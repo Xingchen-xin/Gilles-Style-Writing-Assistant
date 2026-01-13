@@ -240,18 +240,23 @@ function setRating(index, rating) {
     status.className = `feedback-status ${rating}`;
 }
 
+// Store original texts for cancel functionality
+let originalTexts = {};
+
 function openEditor(index) {
     const textEl = document.getElementById(`variant-text-${index}`);
     const originalText = textEl.textContent;
 
+    // Store original text for cancel
+    originalTexts[index] = originalText;
+
     // Replace with textarea
-    const card = textEl.closest('.variant-card');
     const editorHtml = `
         <div class="editor-container" id="editor-${index}">
             <textarea class="edit-textarea" id="edit-textarea-${index}">${escapeHtml(originalText)}</textarea>
             <div class="editor-actions">
                 <button class="save-edit-btn" onclick="saveEdit(${index})">Save Edit</button>
-                <button class="cancel-edit-btn" onclick="cancelEdit(${index}, '${escapeHtml(originalText).replace(/'/g, "\\'")}')">Cancel</button>
+                <button class="cancel-edit-btn" onclick="cancelEdit(${index})">Cancel</button>
             </div>
         </div>
     `;
@@ -274,6 +279,9 @@ function saveEdit(index) {
     const textEl = document.getElementById(`variant-text-${index}`);
     textEl.textContent = editedText;
 
+    // Update original text for future cancels
+    originalTexts[index] = editedText;
+
     const card = textEl.closest('.variant-card');
     const buttons = card.querySelectorAll('.feedback-btn');
     buttons.forEach(btn => btn.classList.remove('selected'));
@@ -284,9 +292,9 @@ function saveEdit(index) {
     status.className = 'feedback-status edited';
 }
 
-function cancelEdit(index, originalText) {
+function cancelEdit(index) {
     const textEl = document.getElementById(`variant-text-${index}`);
-    textEl.textContent = originalText;
+    textEl.textContent = originalTexts[index] || '';
 }
 
 async function submitFeedback() {

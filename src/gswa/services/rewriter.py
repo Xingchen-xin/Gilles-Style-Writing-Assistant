@@ -8,7 +8,7 @@ from typing import Optional
 
 from gswa.api.schemas import (
     RewriteRequest, RewriteResponse, RewriteVariant,
-    SimilarityScores, Strategy
+    SimilarityScores
 )
 from gswa.services.llm_client import get_llm_client
 from gswa.services.similarity import SimilarityService

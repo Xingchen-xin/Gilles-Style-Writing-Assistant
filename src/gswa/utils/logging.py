@@ -4,7 +4,6 @@ Provides audit logging for rewrite operations.
 """
 import logging
 import hashlib
-from datetime import datetime
 from typing import Optional
 from pathlib import Path
 

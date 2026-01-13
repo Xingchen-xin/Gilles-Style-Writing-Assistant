@@ -1,6 +1,7 @@
-"""LLM Client for vLLM server.
+"""LLM Client for local inference servers.
 
-Uses OpenAI-compatible API to communicate with local vLLM server.
+Uses OpenAI-compatible API to communicate with local LLM servers.
+Supports multiple backends: vLLM, Ollama, LM Studio.
 """
 import httpx
 import logging
@@ -13,7 +14,13 @@ logger = logging.getLogger(__name__)
 
 
 class LLMClient:
-    """Client for vLLM OpenAI-compatible API."""
+    """Client for OpenAI-compatible local LLM servers.
+
+    Supports:
+    - vLLM (Linux/NVIDIA GPU)
+    - Ollama (Mac Apple Silicon / Linux)
+    - LM Studio (Desktop)
+    """
 
     # Allowed hosts for local-only operation
     ALLOWED_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0"}
@@ -21,11 +28,14 @@ class LLMClient:
     def __init__(self):
         """Initialize LLM client with security validation."""
         self.settings = get_settings()
-        self._base_url = self.settings.vllm_base_url.rstrip("/")
+        self._backend = self.settings.llm_backend
+        self._base_url = self.settings.llm_base_url.rstrip("/")
         self._model = self.settings.vllm_model_name
 
         # Security: Ensure we're connecting locally
         self._validate_local_only()
+
+        logger.info(f"LLM client initialized: backend={self._backend}, url={self._base_url}")
 
     def _validate_local_only(self) -> None:
         """Ensure we only connect to local server.
@@ -40,30 +50,36 @@ class LLMClient:
                 raise ValueError(
                     f"External API calls forbidden. "
                     f"Host '{parsed.hostname}' is not localhost. "
-                    f"Only local vLLM server is allowed."
+                    f"Only local LLM servers are allowed."
                 )
 
     async def check_health(self) -> dict:
-        """Check if vLLM server is healthy.
+        """Check if LLM server is healthy.
 
         Returns:
             Dictionary with status and model info
         """
         async with httpx.AsyncClient(timeout=5.0) as client:
             try:
+                # Try OpenAI-compatible /models endpoint
                 resp = await client.get(f"{self._base_url}/models")
                 if resp.status_code == 200:
                     data = resp.json()
                     models = data.get("data", [])
                     return {
                         "status": "connected",
+                        "backend": self._backend,
                         "models": [m.get("id") for m in models]
                     }
             except httpx.ConnectError:
-                return {"status": "disconnected", "error": "Cannot connect to vLLM server"}
+                return {
+                    "status": "disconnected",
+                    "backend": self._backend,
+                    "error": f"Cannot connect to {self._backend} server at {self._base_url}"
+                }
             except Exception as e:
-                return {"status": "error", "error": str(e)}
-        return {"status": "disconnected"}
+                return {"status": "error", "backend": self._backend, "error": str(e)}
+        return {"status": "disconnected", "backend": self._backend}
 
     async def complete(
         self,
@@ -72,7 +88,7 @@ class LLMClient:
         max_tokens: int = 1024,
         stop: Optional[list[str]] = None,
     ) -> str:
-        """Generate completion from vLLM.
+        """Generate completion from LLM server.
 
         Args:
             messages: Chat messages [{"role": "...", "content": "..."}]
@@ -94,6 +110,10 @@ class LLMClient:
         }
         if stop:
             payload["stop"] = stop
+
+        # Add stream: false for Ollama compatibility
+        if self._backend == "ollama":
+            payload["stream"] = False
 
         async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(
@@ -152,6 +172,11 @@ class LLMClient:
         """Get the model name."""
         return self._model
 
+    @property
+    def backend(self) -> str:
+        """Get the backend type."""
+        return self._backend
+
 
 # Singleton instance
 _llm_client: Optional[LLMClient] = None
@@ -163,3 +188,9 @@ def get_llm_client() -> LLMClient:
     if _llm_client is None:
         _llm_client = LLMClient()
     return _llm_client
+
+
+def reset_llm_client() -> None:
+    """Reset the LLM client singleton (useful for testing)."""
+    global _llm_client
+    _llm_client = None

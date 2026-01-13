@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GSWA - Gilles-Style Writing Assistant</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>GSWA</h1>
+            <p class="subtitle">Gilles-Style Writing Assistant</p>
+            <div id="health-status" class="health-badge">Checking...</div>
+        </header>
+
+        <main>
+            <div class="input-section">
+                <label for="input-text">Paste your paragraph:</label>
+                <textarea
+                    id="input-text"
+                    placeholder="Enter the paragraph you want to rewrite..."
+                    rows="8"
+                ></textarea>
+
+                <div class="options">
+                    <div class="option-group">
+                        <label for="section">Section:</label>
+                        <select id="section">
+                            <option value="">Auto-detect</option>
+                            <option value="Abstract">Abstract</option>
+                            <option value="Introduction">Introduction</option>
+                            <option value="Methods">Methods</option>
+                            <option value="Results">Results</option>
+                            <option value="Discussion">Discussion</option>
+                            <option value="Conclusion">Conclusion</option>
+                        </select>
+                    </div>
+
+                    <div class="option-group">
+                        <label for="n-variants">Variants:</label>
+                        <select id="n-variants">
+                            <option value="3">3</option>
+                            <option value="4">4</option>
+                            <option value="5">5</option>
+                        </select>
+                    </div>
+                </div>
+
+                <button id="generate-btn" class="primary-btn">
+                    Generate Variants
+                </button>
+            </div>
+
+            <div id="results-section" class="results-section hidden">
+                <h2>Generated Variants</h2>
+                <div id="variants-container"></div>
+                <div id="meta-info" class="meta-info"></div>
+            </div>
+
+            <div id="loading" class="loading hidden">
+                <div class="spinner"></div>
+                <p>Generating variants...</p>
+            </div>
+
+            <div id="error" class="error hidden"></div>
+        </main>
+
+        <footer>
+            <p>GSWA - Fully offline scientific paper rewriter</p>
+        </footer>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

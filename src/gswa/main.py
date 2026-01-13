@@ -43,7 +43,7 @@ def create_app() -> FastAPI:
     Returns:
         Configured FastAPI application instance
     """
-    settings = get_settings()  # This validates security settings
+    get_settings()  # This validates security settings
 
     app = FastAPI(
         title="GSWA - Gilles-Style Writing Assistant",

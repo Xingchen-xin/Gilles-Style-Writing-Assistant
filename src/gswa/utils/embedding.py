@@ -3,7 +3,6 @@
 Uses sentence transformers for semantic similarity.
 """
 import numpy as np
-from typing import Optional
 from pathlib import Path
 
 

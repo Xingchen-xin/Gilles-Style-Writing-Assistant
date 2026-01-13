@@ -277,6 +277,209 @@ footer {
     margin-top: 30px;
 }
 
+/* Feedback section */
+.feedback-section {
+    margin-top: 15px;
+    padding-top: 15px;
+    border-top: 1px solid #eee;
+}
+
+.feedback-label {
+    font-size: 0.9rem;
+    color: #666;
+    margin-right: 10px;
+}
+
+.feedback-buttons {
+    display: inline-flex;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.feedback-btn {
+    padding: 6px 12px;
+    border: 2px solid #ddd;
+    border-radius: 5px;
+    background: white;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: all 0.2s;
+}
+
+.feedback-btn:hover {
+    border-color: #aaa;
+}
+
+.feedback-btn.best {
+    color: #27ae60;
+}
+
+.feedback-btn.best:hover,
+.feedback-btn.best.selected {
+    background: #27ae60;
+    color: white;
+    border-color: #27ae60;
+}
+
+.feedback-btn.good {
+    color: #3498db;
+}
+
+.feedback-btn.good:hover,
+.feedback-btn.good.selected {
+    background: #3498db;
+    color: white;
+    border-color: #3498db;
+}
+
+.feedback-btn.bad {
+    color: #e74c3c;
+}
+
+.feedback-btn.bad:hover,
+.feedback-btn.bad.selected {
+    background: #e74c3c;
+    color: white;
+    border-color: #e74c3c;
+}
+
+.feedback-btn.edit {
+    color: #9b59b6;
+}
+
+.feedback-btn.edit:hover,
+.feedback-btn.edit.selected {
+    background: #9b59b6;
+    color: white;
+    border-color: #9b59b6;
+}
+
+.feedback-status {
+    display: inline-block;
+    margin-left: 15px;
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+
+.feedback-status.best {
+    color: #27ae60;
+}
+
+.feedback-status.good {
+    color: #3498db;
+}
+
+.feedback-status.bad {
+    color: #e74c3c;
+}
+
+.feedback-status.edited {
+    color: #9b59b6;
+}
+
+/* Editor */
+.editor-container {
+    margin-top: 10px;
+}
+
+.edit-textarea {
+    width: 100%;
+    min-height: 150px;
+    padding: 12px;
+    border: 2px solid #9b59b6;
+    border-radius: 8px;
+    font-size: 1rem;
+    font-family: inherit;
+    line-height: 1.6;
+}
+
+.editor-actions {
+    margin-top: 10px;
+    display: flex;
+    gap: 10px;
+}
+
+.save-edit-btn {
+    padding: 8px 16px;
+    background: #9b59b6;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+.save-edit-btn:hover {
+    background: #8e44ad;
+}
+
+.cancel-edit-btn {
+    padding: 8px 16px;
+    background: #95a5a6;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+.cancel-edit-btn:hover {
+    background: #7f8c8d;
+}
+
+/* Submit feedback section */
+.submit-feedback-section {
+    background: white;
+    padding: 20px;
+    border-radius: 10px;
+    margin-top: 20px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+}
+
+.feedback-notes {
+    margin-bottom: 15px;
+}
+
+.feedback-notes textarea {
+    margin-top: 8px;
+}
+
+.submit-feedback-btn {
+    width: 100%;
+    padding: 12px;
+    background: #9b59b6;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.submit-feedback-btn:hover {
+    background: #8e44ad;
+}
+
+.submit-feedback-btn:disabled {
+    background: #bdc3c7;
+    cursor: not-allowed;
+}
+
+.submit-status {
+    margin-top: 10px;
+    padding: 10px;
+    border-radius: 5px;
+    text-align: center;
+}
+
+.submit-status.success {
+    background: #d4edda;
+    color: #155724;
+}
+
+.submit-status.error {
+    background: #f8d7da;
+    color: #721c24;
+}
+
 /* Responsive design */
 @media (max-width: 600px) {
     .options {

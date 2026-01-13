@@ -1,18 +1,20 @@
-.PHONY: install dev test lint smoke-test run clean build-index help
+.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help
 
 # Default target
 help:
 	@echo "GSWA - Gilles-Style Writing Assistant"
 	@echo ""
 	@echo "Available targets:"
-	@echo "  install      - Install core dependencies"
-	@echo "  dev          - Install development dependencies"
-	@echo "  test         - Run unit tests"
-	@echo "  lint         - Run linter"
-	@echo "  smoke-test   - Run end-to-end smoke test"
-	@echo "  run          - Start GSWA server"
-	@echo "  build-index  - Build similarity index from corpus"
-	@echo "  clean        - Clean build artifacts"
+	@echo "  install        - Install core dependencies"
+	@echo "  dev            - Install development dependencies"
+	@echo "  test           - Run unit tests"
+	@echo "  lint           - Run linter"
+	@echo "  smoke-test     - Run end-to-end smoke test"
+	@echo "  run            - Start GSWA server"
+	@echo "  parse-corpus   - Parse PDF/DOCX files to JSONL"
+	@echo "  build-index    - Build similarity index from corpus"
+	@echo "  export-dpo     - Export feedback data for DPO training"
+	@echo "  clean          - Clean build artifacts"
 
 # Install core dependencies
 install:
@@ -53,6 +55,14 @@ build-index:
 # Start vLLM server
 start-vllm:
 	bash scripts/start_vllm.sh
+
+# Parse corpus documents (PDF/DOCX -> JSONL)
+parse-corpus:
+	python scripts/parse_corpus.py
+
+# Export feedback data for DPO training
+export-dpo:
+	python scripts/export_dpo_data.py
 
 # Clean build artifacts
 clean:

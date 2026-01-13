@@ -97,3 +97,48 @@ class HealthResponse(BaseModel):
     model_loaded: Optional[str]
     corpus_paragraphs: int
     index_loaded: bool
+
+
+# === Feedback Schemas (for DPO training) ===
+
+class FeedbackType(str, Enum):
+    """Types of feedback."""
+    BEST = "best"          # User selected this as the best variant
+    GOOD = "good"          # Acceptable but not the best
+    BAD = "bad"            # Not acceptable
+    EDITED = "edited"      # User edited the output
+
+
+class VariantFeedback(BaseModel):
+    """Feedback for a single variant."""
+    variant_index: int = Field(..., ge=0, le=4, description="Index of the variant (0-4)")
+    feedback_type: FeedbackType
+    edited_text: Optional[str] = Field(None, description="User's edited version (if edited)")
+
+
+class FeedbackRequest(BaseModel):
+    """Request body for /v1/feedback."""
+    session_id: str = Field(..., min_length=1, description="Unique session identifier")
+    input_text: str = Field(..., min_length=10, description="Original input text")
+    section: Optional[Section] = None
+    variants: list[VariantFeedback] = Field(..., min_length=1, description="Feedback for each variant")
+
+    # Optional metadata
+    user_notes: Optional[str] = Field(None, max_length=1000, description="Additional notes from user")
+
+
+class FeedbackResponse(BaseModel):
+    """Response body for /v1/feedback."""
+    success: bool
+    feedback_id: str
+    message: str
+
+
+class FeedbackStats(BaseModel):
+    """Statistics about collected feedback."""
+    total_sessions: int
+    total_variants_rated: int
+    best_count: int
+    good_count: int
+    bad_count: int
+    edited_count: int

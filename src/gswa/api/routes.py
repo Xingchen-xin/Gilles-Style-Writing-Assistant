@@ -8,11 +8,13 @@ from fastapi import APIRouter, HTTPException
 from gswa.api.schemas import (
     RewriteRequest, RewriteResponse,
     ReplyRequest, ReplyResponse,
-    HealthResponse
+    HealthResponse,
+    FeedbackRequest, FeedbackResponse, FeedbackStats
 )
 from gswa.services.rewriter import get_rewriter_service
 from gswa.services.llm_client import get_llm_client
 from gswa.services.similarity import get_similarity_service
+from gswa.services.feedback import get_feedback_service
 
 
 logger = logging.getLogger(__name__)
@@ -91,4 +93,39 @@ async def reply(request: ReplyRequest):
         )
     except Exception as e:
         logger.exception("Error in reply")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/feedback", response_model=FeedbackResponse)
+async def submit_feedback(request: FeedbackRequest):
+    """Submit feedback on generated variants.
+
+    Used to collect preference data for DPO training.
+
+    Args:
+        request: Feedback with ratings for each variant
+
+    Returns:
+        Confirmation of feedback submission
+    """
+    try:
+        feedback_service = get_feedback_service()
+        return feedback_service.submit_feedback(request)
+    except Exception as e:
+        logger.exception("Error in submit_feedback")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/feedback/stats", response_model=FeedbackStats)
+async def get_feedback_stats():
+    """Get feedback collection statistics.
+
+    Returns:
+        Statistics about collected feedback
+    """
+    try:
+        feedback_service = get_feedback_service()
+        return feedback_service.get_stats()
+    except Exception as e:
+        logger.exception("Error in get_feedback_stats")
         raise HTTPException(status_code=500, detail=str(e))

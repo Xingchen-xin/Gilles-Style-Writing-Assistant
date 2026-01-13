@@ -45,6 +45,7 @@ logs/
 data/corpus/raw/
 data/index/*.faiss
 data/index/*.npy
+data/index/*.json
 
 # Test artifacts
 .pytest_cache/

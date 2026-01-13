@@ -3,8 +3,14 @@
 This module handles all configuration with security-first defaults.
 External API calls are DISABLED by default and cannot be enabled
 without explicit override.
+
+Supports multiple LLM backends:
+- vllm: For Linux/NVIDIA GPU servers
+- ollama: For Mac (Apple Silicon) and Linux
+- lm-studio: For desktop users with LM Studio
 """
 from functools import lru_cache
+from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,10 +26,32 @@ class Settings(BaseSettings):
     # === SECURITY (HARDCODED DEFAULTS) ===
     allow_external_api: bool = False  # MUST remain False
 
+    # === LLM Backend ===
+    # Supported: "vllm" (Linux/NVIDIA), "ollama" (Mac/Linux), "lm-studio" (Desktop)
+    llm_backend: Literal["vllm", "ollama", "lm-studio"] = "vllm"
+
     # === LLM Server ===
+    # Default URLs by backend:
+    # - vllm: http://localhost:8000/v1
+    # - ollama: http://localhost:11434/v1
+    # - lm-studio: http://localhost:1234/v1
     vllm_base_url: str = "http://localhost:8000/v1"
     vllm_model_name: str = "mistral-7b-instruct"
-    vllm_api_key: str = "dummy"  # vLLM doesn't need real key locally
+    vllm_api_key: str = "dummy"  # Local servers don't need real keys
+
+    @property
+    def llm_base_url(self) -> str:
+        """Get the LLM base URL based on backend type."""
+        # If explicitly set, use that
+        if self.vllm_base_url != "http://localhost:8000/v1":
+            return self.vllm_base_url
+        # Otherwise use backend defaults
+        defaults = {
+            "vllm": "http://localhost:8000/v1",
+            "ollama": "http://localhost:11434/v1",
+            "lm-studio": "http://localhost:1234/v1",
+        }
+        return defaults.get(self.llm_backend, self.vllm_base_url)
 
     # === Similarity Thresholds ===
     threshold_ngram_max_match: int = 12

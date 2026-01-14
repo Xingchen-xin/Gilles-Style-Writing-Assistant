@@ -1,4 +1,4 @@
-.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup-mac setup-ollama prepare-training finetune-lora finetune-mlx finetune-all list-docs training-stats check-deps check-mlx check-lora
+.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup-mac setup-ollama prepare-training finetune-lora finetune-mlx finetune-all finetune-smart list-docs training-stats check-deps check-mlx check-lora corpus corpus-add corpus-guide corpus-validate
 
 # Default target
 help:
@@ -27,14 +27,18 @@ help:
 	@echo "  lint           - Run linter"
 	@echo "  smoke-test     - Run end-to-end smoke test"
 	@echo ""
-	@echo "  === Corpus Management ==="
-	@echo "  parse-corpus   - Parse PDF/DOCX files to JSONL"
-	@echo "  build-index    - Build similarity index from corpus"
+	@echo "  === Corpus Management (语料管理) ==="
+	@echo "  corpus            - Show corpus status and files"
+	@echo "  corpus-guide      - Show quick guide for adding files"
+	@echo "  corpus-validate   - Validate all corpus files"
+	@echo "  parse-corpus      - Parse PDF/DOCX files to JSONL"
+	@echo "  build-index       - Build similarity index from corpus"
 	@echo ""
-	@echo "  === Fine-tuning (Gilles Style) ==="
+	@echo "  === Fine-tuning (微调训练) ==="
+	@echo "  finetune-smart    - 🚀 One-click smart training (auto-detect platform)"
 	@echo "  finetune-all      - One-click: parse + train + finetune (Mac)"
 	@echo "  prepare-training  - Prepare training data from corpus"
-	@echo "  finetune-lora     - Fine-tune with LoRA (Linux/GPU)"
+	@echo "  finetune-lora     - Fine-tune with LoRA (Linux/Windows/GPU)"
 	@echo "  finetune-mlx      - Fine-tune with MLX (Mac Apple Silicon)"
 	@echo "  export-dpo        - Export feedback for DPO training"
 	@echo "  list-docs         - List all document IDs in corpus"
@@ -126,9 +130,10 @@ parse-corpus:
 prepare-training:
 	python scripts/prepare_training_data.py --format alpaca --weighted --split
 
-# Fine-tune with LoRA (Linux with NVIDIA GPU)
+# Fine-tune with LoRA (Linux/Windows with NVIDIA GPU)
+# Uses auto-detection to select optimal settings for your hardware
 finetune-lora: prepare-training
-	python scripts/finetune_lora.py --quantize 4bit
+	python scripts/finetune_lora.py --auto
 
 # Fine-tune with MLX (Mac Apple Silicon)
 # Uses auto-detection to select optimal settings for your hardware
@@ -171,6 +176,35 @@ check-mlx:
 # Check LoRA dependencies (Linux)
 check-lora:
 	python scripts/finetune_lora.py --check-only
+
+# ==================
+# Smart Training
+# ==================
+
+# Smart fine-tuning: auto-detect platform and hardware
+# Works on Mac, Linux, and Windows
+finetune-smart: parse-corpus prepare-training
+	python scripts/smart_finetune.py
+	@echo ""
+	@echo "============================================"
+	@echo "🎉 Fine-tuning complete!"
+	@echo "============================================"
+
+# ==================
+# Corpus Management
+# ==================
+
+# Show corpus status
+corpus:
+	python scripts/corpus_manager.py
+
+# Show quick guide for adding corpus files
+corpus-guide:
+	python scripts/corpus_manager.py --guide
+
+# Validate all corpus files
+corpus-validate:
+	python scripts/corpus_manager.py --validate
 
 # ==================
 # Utilities

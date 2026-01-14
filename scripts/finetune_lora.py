@@ -1,29 +1,231 @@
 #!/usr/bin/env python3
 """
-LoRA Fine-tuning Script for GSWA (Linux/NVIDIA GPU).
+LoRA Fine-tuning Script for GSWA (Linux/Windows with NVIDIA GPU).
 
 This script fine-tunes a base model on Gilles's writing style using LoRA.
-Optimized for Linux servers with NVIDIA GPUs.
+Supports Linux and Windows with NVIDIA GPUs, with auto-detection of hardware.
 
 Requirements:
     pip install torch transformers peft datasets accelerate bitsandbytes
 
 Usage:
-    # Basic usage (Linux with NVIDIA GPU)
-    python scripts/finetune_lora.py --base-model mistralai/Mistral-7B-Instruct-v0.2
+    # Auto-detect settings
+    python scripts/finetune_lora.py --auto
 
-    # 4-bit quantized (lower memory, recommended)
+    # Basic usage with QLoRA (recommended)
     python scripts/finetune_lora.py --quantize 4bit
 
-    # With custom training data
-    python scripts/finetune_lora.py --training-data ./data/training/alpaca_train.jsonl
+    # Use a different base model
+    python scripts/finetune_lora.py --model Qwen/Qwen2.5-7B-Instruct
+
+    # CPU-only mode (slow but works without GPU)
+    python scripts/finetune_lora.py --cpu
 """
 import argparse
 import json
 import os
+import platform
+import subprocess
 import sys
 from pathlib import Path
 from datetime import datetime
+
+# ==============================================================================
+# Configuration
+# ==============================================================================
+
+CONFIG_PATH = Path(__file__).parent.parent / "config" / "training_profiles.json"
+
+# Model aliases for easier usage
+MODEL_ALIASES = {
+    "mistral": "mistralai/Mistral-7B-Instruct-v0.3",
+    "mistral-large": "mistralai/Mistral-Large-Instruct-2407",
+    "llama3": "meta-llama/Llama-3.1-8B-Instruct",
+    "llama3-70b": "meta-llama/Llama-3.1-70B-Instruct",
+    "qwen": "Qwen/Qwen2.5-7B-Instruct",
+    "qwen-14b": "Qwen/Qwen2.5-14B-Instruct",
+    "qwen-1.5b": "Qwen/Qwen2.5-1.5B-Instruct",
+    "phi": "microsoft/Phi-3.5-mini-instruct",
+    "gemma": "google/gemma-2-9b-it",
+    "gemma-2b": "google/gemma-2-2b-it",
+}
+
+
+# ==============================================================================
+# Auto-Detection
+# ==============================================================================
+
+def get_gpu_info() -> dict:
+    """Detect NVIDIA GPU information."""
+    info = {
+        "available": False,
+        "name": None,
+        "vram_gb": 0,
+        "cuda_available": False,
+    }
+
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            line = result.stdout.strip().split("\n")[0]
+            parts = line.split(",")
+            info["name"] = parts[0].strip()
+            info["vram_gb"] = float(parts[1].strip()) / 1024
+            info["available"] = True
+    except Exception:
+        pass
+
+    # Check CUDA via PyTorch
+    try:
+        import torch
+        info["cuda_available"] = torch.cuda.is_available()
+        if info["cuda_available"] and not info["name"]:
+            info["name"] = torch.cuda.get_device_name(0)
+            info["vram_gb"] = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            info["available"] = True
+    except Exception:
+        pass
+
+    return info
+
+
+def get_system_memory_gb() -> float:
+    """Get system RAM in GB."""
+    try:
+        if platform.system() == "Linux":
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        return int(line.split()[1]) / (1024 ** 2)
+        elif platform.system() == "Windows":
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            c_ulonglong = ctypes.c_ulonglong
+
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", c_ulonglong),
+                    ("ullAvailPhys", c_ulonglong),
+                    ("ullTotalPageFile", c_ulonglong),
+                    ("ullAvailPageFile", c_ulonglong),
+                    ("ullTotalVirtual", c_ulonglong),
+                    ("ullAvailVirtual", c_ulonglong),
+                    ("ullAvailExtendedVirtual", c_ulonglong),
+                ]
+
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(stat)
+            kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+            return stat.ullTotalPhys / (1024 ** 3)
+    except Exception:
+        pass
+    return 16.0
+
+
+def load_training_profiles() -> dict:
+    """Load training profiles from config file."""
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH, 'r') as f:
+            return json.load(f)
+    return {"profiles": {}}
+
+
+def auto_detect_settings() -> dict:
+    """Auto-detect optimal settings based on hardware."""
+    gpu_info = get_gpu_info()
+    ram_gb = get_system_memory_gb()
+
+    print("\n" + "=" * 60)
+    print("Auto-Detecting Hardware")
+    print("=" * 60)
+    print(f"  OS: {platform.system()} {platform.release()}")
+    print(f"  System RAM: {ram_gb:.1f} GB")
+
+    if gpu_info["available"]:
+        print(f"  GPU: {gpu_info['name']}")
+        print(f"  VRAM: {gpu_info['vram_gb']:.1f} GB")
+        print(f"  CUDA: {'Available' if gpu_info['cuda_available'] else 'Not available'}")
+        vram = gpu_info["vram_gb"]
+    else:
+        print("  GPU: Not detected (will use CPU)")
+        vram = 0
+
+    # Select settings based on VRAM
+    settings = {
+        "batch_size": 1,
+        "gradient_accumulation_steps": 16,
+        "max_length": 512,
+        "quantize": "4bit",
+        "lora_r": 8,
+        "lora_alpha": 16,
+        "epochs": 3,
+        "use_cpu": not gpu_info["cuda_available"],
+    }
+
+    if vram >= 48:
+        settings.update({
+            "batch_size": 8,
+            "gradient_accumulation_steps": 1,
+            "max_length": 2048,
+            "quantize": "none",
+            "lora_r": 32,
+            "lora_alpha": 64,
+        })
+        profile = "High-end GPU (48GB+)"
+    elif vram >= 24:
+        settings.update({
+            "batch_size": 4,
+            "gradient_accumulation_steps": 2,
+            "max_length": 2048,
+            "quantize": "4bit",
+            "lora_r": 16,
+            "lora_alpha": 32,
+        })
+        profile = "Professional GPU (24GB)"
+    elif vram >= 16:
+        settings.update({
+            "batch_size": 2,
+            "gradient_accumulation_steps": 4,
+            "max_length": 1536,
+            "quantize": "4bit",
+            "lora_r": 16,
+            "lora_alpha": 32,
+        })
+        profile = "Standard GPU (16GB)"
+    elif vram >= 8:
+        settings.update({
+            "batch_size": 1,
+            "gradient_accumulation_steps": 8,
+            "max_length": 1024,
+            "quantize": "4bit",
+            "lora_r": 8,
+            "lora_alpha": 16,
+        })
+        profile = "Entry GPU (8GB)"
+    elif vram >= 4:
+        settings.update({
+            "batch_size": 1,
+            "gradient_accumulation_steps": 16,
+            "max_length": 512,
+            "quantize": "4bit",
+            "lora_r": 4,
+            "lora_alpha": 8,
+        })
+        profile = "Low VRAM (4GB)"
+    else:
+        profile = "CPU Only"
+
+    print(f"\n  Selected Profile: {profile}")
+    print(f"  Settings: batch={settings['batch_size']}, "
+          f"max_len={settings['max_length']}, "
+          f"quantize={settings['quantize']}")
+
+    return settings
 
 
 # ==============================================================================
@@ -447,26 +649,49 @@ def train_with_transformers(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="LoRA fine-tuning for GSWA (Linux/NVIDIA GPU)",
+        description="LoRA fine-tuning for GSWA (Linux/Windows with NVIDIA GPU)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic training with QLoRA (recommended)
-  python scripts/finetune_lora.py --quantize 4bit
+  # Auto-detect optimal settings (recommended)
+  python scripts/finetune_lora.py --auto
 
-  # Full precision LoRA (needs more VRAM)
-  python scripts/finetune_lora.py --quantize none
+  # Use a specific model with alias
+  python scripts/finetune_lora.py --model qwen
 
-  # Use a different base model
-  python scripts/finetune_lora.py --base-model meta-llama/Llama-2-7b-chat-hf
+  # Use a specific model with full path
+  python scripts/finetune_lora.py --model Qwen/Qwen2.5-7B-Instruct
+
+  # CPU-only training (slow)
+  python scripts/finetune_lora.py --cpu
+
+Available model aliases:
+  mistral, mistral-large, llama3, llama3-70b, qwen, qwen-14b, qwen-1.5b,
+  phi, gemma, gemma-2b
 
 Note: For Mac users, use scripts/finetune_mlx_mac.py instead.
         """
     )
     parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Auto-detect optimal settings based on hardware"
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model to fine-tune (alias like 'qwen' or full HuggingFace path)"
+    )
+    parser.add_argument(
         "--base-model",
-        default="mistralai/Mistral-7B-Instruct-v0.2",
-        help="Base model to fine-tune (default: Mistral-7B-Instruct)"
+        default="mistralai/Mistral-7B-Instruct-v0.3",
+        help="[Deprecated: use --model] Base model to fine-tune"
+    )
+    parser.add_argument(
+        "--cpu",
+        action="store_true",
+        help="Force CPU training (very slow)"
     )
     parser.add_argument(
         "--training-data",
@@ -544,6 +769,34 @@ Note: For Mac users, use scripts/finetune_mlx_mac.py instead.
     print("GSWA LoRA Fine-tuning Script")
     print("=" * 60)
 
+    # Handle model selection
+    if args.model:
+        # Resolve alias if provided
+        args.base_model = MODEL_ALIASES.get(args.model.lower(), args.model)
+        print(f"\nModel: {args.base_model}")
+
+    # Auto-detect settings if requested
+    if args.auto:
+        auto_settings = auto_detect_settings()
+
+        # Apply auto-detected settings (only if not explicitly set by user)
+        if args.batch_size == 4:  # default
+            args.batch_size = auto_settings["batch_size"]
+        if args.gradient_accumulation_steps == 4:  # default
+            args.gradient_accumulation_steps = auto_settings["gradient_accumulation_steps"]
+        if args.max_length == 2048:  # default
+            args.max_length = auto_settings["max_length"]
+        if args.quantize == "4bit":  # default
+            args.quantize = auto_settings["quantize"]
+        if args.lora_r == 16:  # default
+            args.lora_r = auto_settings["lora_r"]
+        if args.lora_alpha == 32:  # default
+            args.lora_alpha = auto_settings["lora_alpha"]
+
+        # Set CPU mode if auto-detected
+        if auto_settings.get("use_cpu"):
+            args.cpu = True
+
     # Check dependencies
     if not check_dependencies():
         sys.exit(1)
@@ -551,6 +804,18 @@ Note: For Mac users, use scripts/finetune_mlx_mac.py instead.
     if args.check_only:
         print("\nDependency check passed!")
         sys.exit(0)
+
+    # CPU mode warning
+    if args.cpu:
+        print("\n" + "=" * 60)
+        print("WARNING: CPU Training Mode")
+        print("=" * 60)
+        print("Training on CPU is 10-100x slower than GPU.")
+        print("Consider using a machine with NVIDIA GPU for better performance.")
+
+        import torch
+        if torch.cuda.is_available():
+            print("\nNote: CUDA GPU detected but --cpu flag is set.")
 
     # Check training data
     if not check_training_data(args.training_data):

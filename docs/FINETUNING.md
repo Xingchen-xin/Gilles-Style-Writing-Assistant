@@ -1,20 +1,26 @@
 # GSWA Fine-tuning Guide / 微调指南
 
-## TL;DR 傻瓜式操作
+## TL;DR 傻瓜式操作 (3 Steps)
 
+```bash
+# 只需 3 步 / Just 3 steps:
+
+# 1. 放文章到文件夹 / Add your documents
+#    data/corpus/raw/                    <- 普通文章 / Regular articles
+#    data/corpus/raw/important_examples/ <- 重要文章 (2.5x权重) / Important examples
+
+# 2. 一键智能训练 / One-click smart training (works on Mac/Linux/Windows!)
+make finetune-smart
+
+# 3. 按照输出提示完成配置 / Follow the output instructions
 ```
-只需 3 步：
 
-1. 放文章到文件夹
-   data/corpus/raw/           <- 普通文章放这里
-   data/corpus/raw/important_examples/  <- 重要文章放这里（权重 2.5x）
+### 🚀 智能训练特性 / Smart Training Features
 
-2. 运行一条命令
-   make finetune-all
-
-3. 重启 GSWA
-   make run
-```
+- **自动检测平台**: Mac → MLX, Linux/Windows → LoRA
+- **自动检测硬件**: GPU型号、显存大小、系统内存
+- **自动选择参数**: batch_size, learning_rate, 量化等级
+- **自动推荐模型**: 根据硬件推荐最佳基底模型
 
 ---
 
@@ -52,12 +58,35 @@ data/corpus/raw/                      <- 普通 Gilles 文章
 
 ---
 
+## 跨平台支持 / Multi-Platform Support
+
+| 平台 | 训练方式 | 检测命令 | 说明 |
+|------|----------|----------|------|
+| **Mac** (M1/M2/M3/M4) | MLX | `make check-mlx` | Apple Silicon 专用优化 |
+| **Linux** (NVIDIA GPU) | LoRA/QLoRA | `make check-lora` | CUDA 加速训练 |
+| **Windows** (NVIDIA GPU) | LoRA/QLoRA | `make check-lora` | 需安装 CUDA |
+| **无 GPU** | CPU LoRA | - | 非常慢，仅供测试 |
+
+## 推荐基底模型 / Recommended Base Models
+
+| 显存/内存 | 推荐模型 | 说明 |
+|-----------|----------|------|
+| 8GB | `Qwen/Qwen2.5-1.5B-Instruct` | 最小可用，基础质量 |
+| 16GB | `Qwen/Qwen2.5-7B-Instruct` | **推荐大多数用户** |
+| 24GB | `Qwen/Qwen2.5-14B-Instruct` | 更好的写作质量 |
+| 48GB+ | `mistralai/Mistral-Large-Instruct-2407` | 最佳质量 |
+
+**为什么推荐 Qwen2.5?**
+- 在学术写作任务上表现优秀
+- 对中英文双语支持良好
+- 训练效率高，收敛快
+
 ## 微调方案对比
 
 | 方案 | 硬件要求 | 训练时间 | 质量 | 难度 | 推荐场景 |
 |------|----------|----------|------|------|----------|
 | **MLX (Mac)** | M1/M2/M3 16GB+ | 1-2小时 | ⭐⭐⭐⭐ | 低 | **Mac 用户首选** |
-| **LoRA** | GPU 16GB+ | 2-4小时 | ⭐⭐⭐⭐ | 中 | Linux 服务器 |
+| **LoRA** | GPU 16GB+ | 2-4小时 | ⭐⭐⭐⭐ | 中 | Linux/Windows |
 | **QLoRA** | GPU 8GB+ | 3-6小时 | ⭐⭐⭐ | 中 | 显存有限 |
 | **Full Fine-tuning** | GPU 48GB+ | 8-24小时 | ⭐⭐⭐⭐⭐ | 高 | 最佳质量 |
 
@@ -156,23 +185,65 @@ make run
 make install-train
 ```
 
-### 第三步：一键微调
+### 第三步：一键智能微调
 
 ```bash
-# QLoRA 微调（推荐，节省显存）
+# 🚀 推荐：智能训练（自动检测GPU并选择参数）
+make finetune-smart
+
+# 或者手动运行 LoRA 训练
 make finetune-lora
 ```
 
 ### 第四步：部署模型
 
-微调完成后，模型保存在 `models/gswa-lora/`。
+微调完成后，模型保存在 `models/gswa-lora-*/`。
 
 ```bash
 # 使用 PEFT 合并模型（可选）
 python scripts/merge_lora.py
 
 # 或者直接配置 .env 使用 LoRA adapter
-LORA_ADAPTER_PATH=./models/gswa-lora
+LORA_ADAPTER_PATH=./models/gswa-lora-xxx
+```
+
+---
+
+## Windows 用户傻瓜式教程
+
+### 前置要求
+
+1. **NVIDIA GPU** (8GB+ VRAM)
+2. **CUDA Toolkit** (推荐 12.1+)
+3. **Python 3.10+**
+
+### 第一步：安装 CUDA
+
+1. 下载 [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads)
+2. 安装并重启
+3. 验证: `nvidia-smi`
+
+### 第二步：安装 PyTorch with CUDA
+
+```powershell
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+pip install transformers peft datasets accelerate bitsandbytes-windows
+```
+
+### 第三步：放入文章
+
+同 Mac/Linux 用户，放入 `data/corpus/raw/` 和 `raw/important_examples/`
+
+### 第四步：一键智能微调
+
+```powershell
+# 在 PowerShell 或 CMD 中运行
+python scripts/smart_finetune.py
+```
+
+或者使用 make (需安装 [GNU Make for Windows](http://gnuwin32.sourceforge.net/packages/make.htm)):
+```powershell
+make finetune-smart
 ```
 
 ---
@@ -231,14 +302,26 @@ make list-docs
 ## 完整 Makefile 命令
 
 ```bash
+# === 语料管理 ===
+make corpus            # 查看语料库状态
+make corpus-guide      # 显示添加文件指南
+make corpus-validate   # 验证所有语料文件
 make parse-corpus      # 解析 raw/ 中的文章
-make prepare-training  # 生成训练数据
-make finetune-mlx      # Mac MLX 微调
-make finetune-lora     # Linux LoRA 微调
-make finetune-all      # 一键完成所有步骤
-
 make list-docs         # 列出所有文章 ID
 make training-stats    # 查看训练数据统计
+
+# === 智能训练 ===
+make finetune-smart    # 🚀 一键智能训练（自动检测平台和硬件）
+make finetune-all      # Mac 一键训练（parse + prepare + mlx）
+
+# === 分步训练 ===
+make prepare-training  # 生成训练数据
+make finetune-mlx      # Mac MLX 微调
+make finetune-lora     # Linux/Windows LoRA 微调
+
+# === 环境检查 ===
+make check-mlx         # 检查 MLX 依赖 (Mac)
+make check-lora        # 检查 LoRA 依赖 (Linux/Windows)
 ```
 
 ---

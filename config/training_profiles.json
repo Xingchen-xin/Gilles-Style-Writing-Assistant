@@ -1,13 +1,37 @@
 {
   "_description": "Training profiles for different hardware configurations",
   "_instructions": [
-    "Choose a profile that matches your hardware, or create a custom one",
-    "Set 'active_profile' to the profile name you want to use",
-    "Or set 'auto_detect': true to let the system choose automatically"
+    "系统会自动检测你的硬件并选择最佳配置 / System auto-detects your hardware",
+    "你也可以手动设置 'active_profile' 来指定配置 / Or set 'active_profile' manually",
+    "Mac: MLX backend / Linux & Windows: LoRA backend"
   ],
 
   "auto_detect": true,
   "active_profile": null,
+
+  "recommended_models": {
+    "_note": "推荐的基底模型 / Recommended base models for scientific writing",
+    "for_8gb_vram": {
+      "model": "Qwen/Qwen2.5-1.5B-Instruct",
+      "mlx": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+      "note": "最小模型，适合低显存 / Smallest model for low VRAM"
+    },
+    "for_16gb_vram": {
+      "model": "Qwen/Qwen2.5-7B-Instruct",
+      "mlx": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+      "alt": "mistralai/Mistral-7B-Instruct-v0.3",
+      "note": "推荐大多数用户 / Recommended for most users"
+    },
+    "for_24gb_vram": {
+      "model": "Qwen/Qwen2.5-14B-Instruct",
+      "mlx": "mlx-community/Qwen2.5-14B-Instruct-4bit",
+      "note": "更好的质量 / Better quality"
+    },
+    "for_48gb_plus": {
+      "model": "mistralai/Mistral-Large-Instruct-2407",
+      "note": "最佳质量 / Best quality"
+    }
+  },
 
   "profiles": {
     "mac_m1_8gb": {
@@ -108,6 +132,61 @@
         "lora_alpha": 64,
         "max_length": 4096,
         "quantize": "none"
+      }
+    },
+    "windows_gpu_8gb": {
+      "description": "Windows with 8GB VRAM GPU (RTX 3070, etc.)",
+      "platform": "windows",
+      "min_vram_gb": 8,
+      "max_vram_gb": 12,
+      "settings": {
+        "batch_size": 1,
+        "gradient_accumulation_steps": 8,
+        "lora_r": 8,
+        "lora_alpha": 16,
+        "max_length": 1024,
+        "quantize": "4bit"
+      }
+    },
+    "windows_gpu_16gb": {
+      "description": "Windows with 16GB VRAM GPU (RTX 4080, etc.)",
+      "platform": "windows",
+      "min_vram_gb": 12,
+      "max_vram_gb": 20,
+      "settings": {
+        "batch_size": 2,
+        "gradient_accumulation_steps": 4,
+        "lora_r": 16,
+        "lora_alpha": 32,
+        "max_length": 2048,
+        "quantize": "4bit"
+      }
+    },
+    "windows_gpu_24gb": {
+      "description": "Windows with 24GB VRAM GPU (RTX 4090, etc.)",
+      "platform": "windows",
+      "min_vram_gb": 20,
+      "max_vram_gb": 48,
+      "settings": {
+        "batch_size": 4,
+        "gradient_accumulation_steps": 2,
+        "lora_r": 16,
+        "lora_alpha": 32,
+        "max_length": 2048,
+        "quantize": "4bit"
+      }
+    },
+    "cpu_only": {
+      "description": "CPU-only training (very slow, for testing)",
+      "platform": "any",
+      "settings": {
+        "batch_size": 1,
+        "gradient_accumulation_steps": 32,
+        "lora_r": 4,
+        "lora_alpha": 8,
+        "max_length": 256,
+        "quantize": "8bit",
+        "epochs": 1
       }
     },
     "conservative": {

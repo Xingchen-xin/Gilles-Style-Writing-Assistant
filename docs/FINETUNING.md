@@ -177,6 +177,26 @@ LORA_ADAPTER_PATH=./models/gswa-lora
 
 ---
 
+## 硬件配置文件（自动检测）
+
+系统会自动检测你的硬件并选择最佳训练参数：
+
+| 硬件 | 内存 | batch_size | num_layers | iters |
+|------|------|------------|------------|-------|
+| M1/M2/M3 8GB | 8GB | 1 | 4 | 300 |
+| M1/M2/M3 16GB | 16GB | 2 | 8 | 500 |
+| M1/M2/M3 Max 32GB+ | 32GB+ | 4 | 16 | 1000 |
+| M1/M2/M3 Ultra 64GB+ | 64GB+ | 8 | 32 | 1500 |
+
+**自定义配置：** 编辑 `config/training_profiles.json` 文件。
+
+**查看系统检测结果：**
+```bash
+python scripts/finetune_mlx_mac.py --auto --check-only
+```
+
+---
+
 ## 手动配置权重（高级）
 
 如果你想精确控制每篇文章的权重，可以编辑 `data/corpus/priority_weights.json`：
@@ -282,6 +302,20 @@ ls data/corpus/raw/important_examples/
 A: 减少迭代次数或使用更小的模型：
 ```bash
 python scripts/finetune_mlx_mac.py --model phi --iters 500
+```
+
+### Q: 内存不足 (Mac)?
+
+A: 系统会自动检测你的硬件并选择合适的配置。如需手动调整：
+```bash
+# 查看可用配置
+python scripts/finetune_mlx_mac.py --list-profiles
+
+# 使用保守配置（最低内存）
+python scripts/finetune_mlx_mac.py --profile conservative
+
+# 或者手动设置参数
+python scripts/finetune_mlx_mac.py --batch-size 1 --num-layers 4 --max-seq-length 512
 ```
 
 ### Q: 显存不足 (CUDA OOM)？

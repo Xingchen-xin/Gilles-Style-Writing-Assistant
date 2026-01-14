@@ -1,0 +1,129 @@
+{
+  "_description": "Training profiles for different hardware configurations",
+  "_instructions": [
+    "Choose a profile that matches your hardware, or create a custom one",
+    "Set 'active_profile' to the profile name you want to use",
+    "Or set 'auto_detect': true to let the system choose automatically"
+  ],
+
+  "auto_detect": true,
+  "active_profile": null,
+
+  "profiles": {
+    "mac_m1_8gb": {
+      "description": "Mac M1/M2/M3 with 8GB RAM (minimal)",
+      "min_memory_gb": 8,
+      "max_memory_gb": 12,
+      "settings": {
+        "batch_size": 1,
+        "num_layers": 4,
+        "iters": 300,
+        "max_seq_length": 512,
+        "learning_rate": 1e-5
+      }
+    },
+    "mac_m1_16gb": {
+      "description": "Mac M1/M2/M3 with 16GB RAM (standard)",
+      "min_memory_gb": 12,
+      "max_memory_gb": 24,
+      "settings": {
+        "batch_size": 2,
+        "num_layers": 8,
+        "iters": 500,
+        "max_seq_length": 1024,
+        "learning_rate": 1e-5
+      }
+    },
+    "mac_m1_32gb": {
+      "description": "Mac M1 Max/M2 Max/M3 Max with 32GB+ RAM",
+      "min_memory_gb": 24,
+      "max_memory_gb": 64,
+      "settings": {
+        "batch_size": 4,
+        "num_layers": 16,
+        "iters": 1000,
+        "max_seq_length": 2048,
+        "learning_rate": 1e-5
+      }
+    },
+    "mac_m1_64gb": {
+      "description": "Mac M1/M2/M3 Ultra with 64GB+ RAM",
+      "min_memory_gb": 64,
+      "max_memory_gb": 256,
+      "settings": {
+        "batch_size": 8,
+        "num_layers": 32,
+        "iters": 1500,
+        "max_seq_length": 4096,
+        "learning_rate": 1e-5
+      }
+    },
+    "linux_gpu_8gb": {
+      "description": "Linux with 8GB VRAM GPU (RTX 3070, etc.)",
+      "min_vram_gb": 8,
+      "max_vram_gb": 12,
+      "settings": {
+        "batch_size": 2,
+        "gradient_accumulation_steps": 8,
+        "lora_r": 8,
+        "lora_alpha": 16,
+        "max_length": 1024,
+        "quantize": "4bit"
+      }
+    },
+    "linux_gpu_16gb": {
+      "description": "Linux with 16GB VRAM GPU (RTX 4080, etc.)",
+      "min_vram_gb": 12,
+      "max_vram_gb": 20,
+      "settings": {
+        "batch_size": 4,
+        "gradient_accumulation_steps": 4,
+        "lora_r": 16,
+        "lora_alpha": 32,
+        "max_length": 2048,
+        "quantize": "4bit"
+      }
+    },
+    "linux_gpu_24gb": {
+      "description": "Linux with 24GB VRAM GPU (RTX 4090, A5000, etc.)",
+      "min_vram_gb": 20,
+      "max_vram_gb": 32,
+      "settings": {
+        "batch_size": 8,
+        "gradient_accumulation_steps": 2,
+        "lora_r": 16,
+        "lora_alpha": 32,
+        "max_length": 2048,
+        "quantize": "8bit"
+      }
+    },
+    "linux_gpu_48gb": {
+      "description": "Linux with 48GB+ VRAM GPU (A6000, H100, etc.)",
+      "min_vram_gb": 40,
+      "max_vram_gb": 256,
+      "settings": {
+        "batch_size": 16,
+        "gradient_accumulation_steps": 1,
+        "lora_r": 32,
+        "lora_alpha": 64,
+        "max_length": 4096,
+        "quantize": "none"
+      }
+    },
+    "conservative": {
+      "description": "Conservative settings for any device (slow but safe)",
+      "settings": {
+        "batch_size": 1,
+        "num_layers": 4,
+        "iters": 200,
+        "max_seq_length": 512,
+        "learning_rate": 1e-5,
+        "gradient_accumulation_steps": 16,
+        "lora_r": 8,
+        "lora_alpha": 16,
+        "max_length": 512,
+        "quantize": "4bit"
+      }
+    }
+  }
+}

@@ -11,6 +11,12 @@ Requirements:
 Usage:
     python scripts/finetune_mlx_mac.py --model mistral --iters 1000
 
+    # Auto-detect settings based on your hardware
+    python scripts/finetune_mlx_mac.py --auto
+
+    # Use a specific profile
+    python scripts/finetune_mlx_mac.py --profile mac_m1_16gb
+
 After training:
     # Create Ollama model
     ollama create gswa-gilles -f models/gswa-mlx-<timestamp>/Modelfile
@@ -27,6 +33,129 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+
+
+# ==============================================================================
+# Configuration and Auto-Detection
+# ==============================================================================
+
+CONFIG_PATH = Path(__file__).parent.parent / "config" / "training_profiles.json"
+
+
+def get_system_memory_gb() -> float:
+    """Get total system memory in GB."""
+    try:
+        if platform.system() == "Darwin":
+            result = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"],
+                capture_output=True,
+                text=True
+            )
+            bytes_mem = int(result.stdout.strip())
+            return bytes_mem / (1024 ** 3)
+    except Exception:
+        pass
+    return 16.0  # Default assumption
+
+
+def get_chip_info() -> dict:
+    """Get Apple Silicon chip information."""
+    info = {"chip": "unknown", "cores": 0}
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            capture_output=True,
+            text=True
+        )
+        info["chip"] = result.stdout.strip()
+
+        result = subprocess.run(
+            ["sysctl", "-n", "hw.ncpu"],
+            capture_output=True,
+            text=True
+        )
+        info["cores"] = int(result.stdout.strip())
+    except Exception:
+        pass
+    return info
+
+
+def load_training_profiles() -> dict:
+    """Load training profiles from config file."""
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH, 'r') as f:
+            return json.load(f)
+    return {"auto_detect": True, "profiles": {}}
+
+
+def auto_detect_profile(profiles: dict) -> tuple[str, dict]:
+    """Auto-detect the best profile based on hardware."""
+    memory_gb = get_system_memory_gb()
+    chip_info = get_chip_info()
+
+    print(f"\n  System Memory: {memory_gb:.1f} GB")
+    print(f"  Chip: {chip_info['chip']}")
+    print(f"  CPU Cores: {chip_info['cores']}")
+
+    # Find the best matching profile
+    best_profile = None
+    best_name = "conservative"
+
+    for name, profile in profiles.get("profiles", {}).items():
+        if not name.startswith("mac_"):
+            continue
+
+        min_mem = profile.get("min_memory_gb", 0)
+        max_mem = profile.get("max_memory_gb", float('inf'))
+
+        if min_mem <= memory_gb < max_mem:
+            best_profile = profile
+            best_name = name
+            break
+
+    if best_profile is None:
+        best_profile = profiles.get("profiles", {}).get("conservative", {})
+        best_name = "conservative"
+
+    print(f"  Selected Profile: {best_name}")
+    if best_profile.get("description"):
+        print(f"  Description: {best_profile['description']}")
+
+    return best_name, best_profile.get("settings", {})
+
+
+def apply_profile_settings(args, profile_settings: dict):
+    """Apply profile settings to args if not explicitly set."""
+    # Map profile settings to args
+    mappings = {
+        "batch_size": "batch_size",
+        "num_layers": "num_layers",
+        "iters": "iters",
+        "max_seq_length": "max_seq_length",
+        "learning_rate": "learning_rate",
+    }
+
+    for profile_key, arg_key in mappings.items():
+        if profile_key in profile_settings:
+            # Only apply if user didn't explicitly set (using default)
+            current = getattr(args, arg_key, None)
+            default = get_default_value(arg_key)
+            if current == default:
+                setattr(args, arg_key, profile_settings[profile_key])
+
+    return args
+
+
+def get_default_value(arg_name: str):
+    """Get default value for an argument."""
+    defaults = {
+        "batch_size": 4,
+        "num_layers": 16,
+        "iters": 1000,
+        "max_seq_length": 1024,
+        "learning_rate": 1e-5,
+    }
+    return defaults.get(arg_name)
 
 
 # ==============================================================================
@@ -511,14 +640,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic training with Mistral
-  python scripts/finetune_mlx_mac.py --model mistral --iters 1000
+  # Auto-detect settings based on hardware (recommended)
+  python scripts/finetune_mlx_mac.py --auto
 
-  # Training with more iterations for better quality
-  python scripts/finetune_mlx_mac.py --model mistral --iters 2000 --batch-size 2
+  # Use a specific profile from config/training_profiles.json
+  python scripts/finetune_mlx_mac.py --profile mac_m1_32gb
 
-  # Use a smaller model for faster training
-  python scripts/finetune_mlx_mac.py --model phi --iters 500
+  # Manual settings
+  python scripts/finetune_mlx_mac.py --model mistral --batch-size 2 --iters 500
+
+  # List available profiles
+  python scripts/finetune_mlx_mac.py --list-profiles
 
 Available models:
   mistral  - Mistral 7B Instruct (recommended)
@@ -527,6 +659,22 @@ Available models:
   gemma2   - Gemma 2 9B
   qwen     - Qwen 1.5 7B
         """
+    )
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Auto-detect optimal settings based on hardware"
+    )
+    parser.add_argument(
+        "--profile",
+        type=str,
+        default=None,
+        help="Use a specific profile from config/training_profiles.json"
+    )
+    parser.add_argument(
+        "--list-profiles",
+        action="store_true",
+        help="List available training profiles"
     )
     parser.add_argument(
         "--model",
@@ -585,9 +733,47 @@ Available models:
     print("GSWA MLX Fine-tuning Script")
     print("=" * 60)
 
+    # Load training profiles
+    profiles = load_training_profiles()
+
+    # List profiles if requested
+    if args.list_profiles:
+        print("\nAvailable Training Profiles:")
+        print("-" * 40)
+        for name, profile in profiles.get("profiles", {}).items():
+            desc = profile.get("description", "No description")
+            print(f"  {name}")
+            print(f"    {desc}")
+            settings = profile.get("settings", {})
+            if settings:
+                print(f"    Settings: batch_size={settings.get('batch_size', '?')}, "
+                      f"num_layers={settings.get('num_layers', '?')}, "
+                      f"iters={settings.get('iters', '?')}")
+            print()
+        print(f"Config file: {CONFIG_PATH}")
+        sys.exit(0)
+
     # Check platform
     if not check_platform():
         sys.exit(1)
+
+    # Apply profile or auto-detect
+    profile_name = None
+    if args.auto or profiles.get("auto_detect", False):
+        print("\n" + "=" * 60)
+        print("Auto-Detecting Hardware")
+        print("=" * 60)
+        profile_name, profile_settings = auto_detect_profile(profiles)
+        args = apply_profile_settings(args, profile_settings)
+    elif args.profile:
+        profile_name = args.profile
+        if profile_name in profiles.get("profiles", {}):
+            profile_settings = profiles["profiles"][profile_name].get("settings", {})
+            args = apply_profile_settings(args, profile_settings)
+            print(f"\n  Using profile: {profile_name}")
+        else:
+            print(f"\nWARNING: Profile '{profile_name}' not found. Using defaults.")
+            print(f"  Available profiles: {', '.join(profiles.get('profiles', {}).keys())}")
 
     # Check MLX
     if not check_mlx():

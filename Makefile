@@ -131,8 +131,10 @@ finetune-lora: prepare-training
 	python scripts/finetune_lora.py --quantize 4bit
 
 # Fine-tune with MLX (Mac Apple Silicon)
+# Uses auto-detection to select optimal settings for your hardware
+# See config/training_profiles.json to customize
 finetune-mlx: prepare-training
-	python scripts/finetune_mlx_mac.py --model mistral --batch-size 2 --num-layers 8 --iters 500
+	python scripts/finetune_mlx_mac.py --auto
 
 # One-click fine-tuning for Mac (parse + prepare + finetune)
 finetune-all: parse-corpus prepare-training finetune-mlx

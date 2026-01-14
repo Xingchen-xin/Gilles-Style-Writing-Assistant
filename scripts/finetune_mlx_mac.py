@@ -317,6 +317,7 @@ def run_mlx_training(args) -> Path | None:
     print(f"  Num layers: {args.num_layers}")
     print(f"  Iterations: {args.iters}")
     print(f"  Learning rate: {args.learning_rate}")
+    print(f"  Max seq length: {args.max_seq_length}")
 
     # Prepare training data
     data_dir = prepare_mlx_data(args.training_data, "./data/training/mlx")
@@ -335,6 +336,7 @@ def run_mlx_training(args) -> Path | None:
         "--num-layers", str(args.num_layers),
         "--iters", str(args.iters),
         "--learning-rate", str(args.learning_rate),
+        "--max-seq-length", str(args.max_seq_length),
         "--adapter-path", str(output_dir / "adapters"),
     ]
 
@@ -348,6 +350,7 @@ def run_mlx_training(args) -> Path | None:
         "batch_size": args.batch_size,
         "iters": args.iters,
         "learning_rate": args.learning_rate,
+        "max_seq_length": args.max_seq_length,
         "command": " ".join(cmd),
         "started_at": datetime.now().isoformat(),
     }
@@ -563,6 +566,12 @@ Available models:
         type=float,
         default=1e-5,
         help="Learning rate (default: 1e-5)"
+    )
+    parser.add_argument(
+        "--max-seq-length",
+        type=int,
+        default=1024,
+        help="Maximum sequence length (default: 1024, reduce if OOM)"
     )
     parser.add_argument(
         "--check-only",

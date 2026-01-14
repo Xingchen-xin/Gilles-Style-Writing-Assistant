@@ -132,7 +132,7 @@ finetune-lora: prepare-training
 
 # Fine-tune with MLX (Mac Apple Silicon)
 finetune-mlx: prepare-training
-	python scripts/finetune_mlx_mac.py --model mistral
+	python scripts/finetune_mlx_mac.py --model mistral --batch-size 2 --num-layers 8 --iters 500
 
 # One-click fine-tuning for Mac (parse + prepare + finetune)
 finetune-all: parse-corpus prepare-training finetune-mlx

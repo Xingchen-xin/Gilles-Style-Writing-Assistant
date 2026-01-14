@@ -314,7 +314,7 @@ def run_mlx_training(args) -> Path | None:
     print(f"\nConfiguration:")
     print(f"  Base model: {model_id}")
     print(f"  Batch size: {args.batch_size}")
-    print(f"  LoRA layers: {args.lora_layers}")
+    print(f"  Num layers: {args.num_layers}")
     print(f"  Iterations: {args.iters}")
     print(f"  Learning rate: {args.learning_rate}")
 
@@ -325,14 +325,14 @@ def run_mlx_training(args) -> Path | None:
     output_dir = get_model_version_dir(args.output_dir, model_short)
     print(f"\n  Output directory: {output_dir}")
 
-    # Build mlx_lm command
+    # Build mlx_lm command (updated for newer mlx-lm versions)
     cmd = [
-        sys.executable, "-m", "mlx_lm.lora",
+        sys.executable, "-m", "mlx_lm", "lora",
         "--model", model_id,
         "--train",
         "--data", data_dir,
         "--batch-size", str(args.batch_size),
-        "--lora-layers", str(args.lora_layers),
+        "--num-layers", str(args.num_layers),
         "--iters", str(args.iters),
         "--learning-rate", str(args.learning_rate),
         "--adapter-path", str(output_dir / "adapters"),
@@ -344,7 +344,7 @@ def run_mlx_training(args) -> Path | None:
         "model_short": model_short,
         "training_data": args.training_data,
         "data_dir": data_dir,
-        "lora_layers": args.lora_layers,
+        "num_layers": args.num_layers,
         "batch_size": args.batch_size,
         "iters": args.iters,
         "learning_rate": args.learning_rate,
@@ -547,10 +547,10 @@ Available models:
         help="Batch size (default: 4, reduce if OOM)"
     )
     parser.add_argument(
-        "--lora-layers",
+        "--num-layers",
         type=int,
         default=16,
-        help="Number of LoRA layers (default: 16)"
+        help="Number of layers to apply LoRA to (default: 16)"
     )
     parser.add_argument(
         "--iters",

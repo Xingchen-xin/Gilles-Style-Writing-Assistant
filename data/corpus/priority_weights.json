@@ -4,54 +4,41 @@
     "weight: 1.0 = normal, 2.0 = double importance, 0.5 = half importance",
     "Documents with higher weights will appear more frequently in training",
     "Add 'priority_docs' for Gilles's most representative papers",
-    "Add 'exclude_docs' for papers to skip during training"
+    "Add 'exclude_docs' for papers to skip during training",
+    "",
+    "EASIEST METHOD: Just put priority papers in raw/important_examples/ folder!",
+    "They will automatically get priority_folder_weight (default 2.5)"
   ],
 
   "default_weight": 1.0,
+  "priority_folder_weight": 2.5,
+
+  "_folder_structure": {
+    "raw/": "Regular articles (weight = 1.0)",
+    "raw/important_examples/": "Priority articles (weight = 2.5 automatically)"
+  },
 
   "priority_docs": {
-    "_comment": "Gilles's most representative papers - higher weights",
-    "vanDissel_AAM2014": {
-      "weight": 2.0,
-      "reason": "Core methodology paper"
-    },
-    "Barka_MicrobiolMolBiolRev2016": {
-      "weight": 2.5,
-      "reason": "Comprehensive review - exemplary writing style"
-    },
-    "vanderMeij_FEMSMicrobiolRev2017": {
-      "weight": 2.0,
-      "reason": "Major review paper"
-    },
-    "van Wezel_McDowall_NPR2011": {
-      "weight": 2.5,
-      "reason": "Classic Gilles style - foundational work"
-    },
-    "Kloosterman_PLoSBiology2020": {
-      "weight": 2.0,
-      "reason": "High-impact recent work"
+    "_comment": "Optional: Manually specify weights for specific documents",
+    "_example": {
+      "some_paper_name": {
+        "weight": 2.0,
+        "reason": "Why this paper is important"
+      }
     }
   },
 
-  "standard_docs": {
-    "_comment": "Normal weight documents (weight = 1.0)",
-    "Li_PLoSBiology2025": {},
-    "Augustijn_PLoSBiology2025": {},
-    "Hulst_NPR2022": {},
-    "Avalos_NPR2022": {},
-    "Zhang_mBio2021": {},
-    "Du_mSystems2022": {}
-  },
-
   "exclude_docs": {
-    "_comment": "Documents to exclude from training (e.g., not representative)",
-    "nmicrobiol201520": {
-      "reason": "Too short, not representative"
+    "_comment": "Documents to exclude from training",
+    "_example": {
+      "bad_paper_name": {
+        "reason": "Too short, not representative"
+      }
     }
   },
 
   "section_weights": {
-    "_comment": "Weight adjustments by paper section",
+    "_comment": "Weight adjustments by paper section (future feature)",
     "Abstract": 1.5,
     "Introduction": 1.3,
     "Results": 1.0,

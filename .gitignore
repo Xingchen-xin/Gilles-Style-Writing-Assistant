@@ -42,7 +42,11 @@ logs/
 *.log
 
 # Data (confidential corpus)
-data/corpus/raw/
+data/corpus/raw/*
+!data/corpus/raw/.gitkeep
+!data/corpus/raw/important_examples/
+data/corpus/raw/important_examples/*
+!data/corpus/raw/important_examples/.gitkeep
 data/index/*.faiss
 data/index/*.npy
 data/index/*.json

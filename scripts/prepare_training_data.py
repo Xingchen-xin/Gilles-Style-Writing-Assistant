@@ -44,23 +44,35 @@ def load_weights(weights_path: str) -> dict:
 
 
 def apply_weights(paragraphs: list[dict], weights: dict) -> list[dict]:
-    """Apply weights to paragraphs, duplicating high-priority ones."""
+    """Apply weights to paragraphs, duplicating high-priority ones.
+
+    Weight priority:
+    1. Documents in important_examples/ folder get priority_folder_weight (default 2.5)
+    2. Documents explicitly listed in priority_docs get their specified weight
+    3. Other documents get default_weight (default 1.0)
+    """
     default_weight = weights.get("default_weight", 1.0)
+    priority_folder_weight = weights.get("priority_folder_weight", 2.5)
     priority_docs = weights.get("priority_docs", {})
     exclude_docs = weights.get("exclude_docs", {})
 
     weighted_paragraphs = []
-    stats = defaultdict(lambda: {"count": 0, "weight": 0})
+    stats = defaultdict(lambda: {"count": 0, "weight": 0, "is_priority": False})
 
     for para in paragraphs:
         doc_id = para.get("doc_id", "unknown")
+        is_priority = para.get("is_priority", False)
 
         # Skip excluded documents
         if doc_id in exclude_docs:
             continue
 
-        # Get weight for this document
-        if doc_id in priority_docs:
+        # Determine weight (priority folder > explicit config > default)
+        if is_priority:
+            # Document is from important_examples/ folder
+            weight = priority_folder_weight
+        elif doc_id in priority_docs:
+            # Document explicitly configured
             weight = priority_docs[doc_id].get("weight", default_weight)
         else:
             weight = default_weight
@@ -72,6 +84,7 @@ def apply_weights(paragraphs: list[dict], weights: dict) -> list[dict]:
 
         stats[doc_id]["count"] += repeat_count
         stats[doc_id]["weight"] = weight
+        stats[doc_id]["is_priority"] = is_priority
 
     return weighted_paragraphs, dict(stats)
 
@@ -370,9 +383,11 @@ def main():
         print(f"  After weighting: {len(paragraphs)} paragraphs")
 
         # Show weight stats
-        priority_count = sum(1 for d, s in stats.items()
-                           if s["weight"] > 1.0)
-        print(f"  Priority documents: {priority_count}")
+        folder_priority = sum(1 for d, s in stats.items() if s.get("is_priority"))
+        config_priority = sum(1 for d, s in stats.items()
+                            if s["weight"] > 1.0 and not s.get("is_priority"))
+        print(f"  Priority documents (from important_examples/): {folder_priority}")
+        print(f"  Priority documents (from config): {config_priority}")
 
     # Generate training data
     formats_to_generate = (

@@ -6,6 +6,10 @@ This script extracts paragraphs from Gilles's papers for:
 1. Building similarity index (anti-verbatim checking)
 2. Style reference for the model
 
+Folder structure:
+    data/corpus/raw/                  <- Regular articles (weight = 1.0)
+    data/corpus/raw/important_examples/   <- Priority articles (weight = 2.5)
+
 Usage:
     python scripts/parse_corpus.py --input ./data/corpus/raw --output ./data/corpus/parsed
 
@@ -57,11 +61,12 @@ def extract_paragraphs_from_text(text: str, min_words: int = 20) -> list[str]:
     return result
 
 
-def parse_pdf(file_path: Path) -> Iterator[dict]:
+def parse_pdf(file_path: Path, is_priority: bool = False) -> Iterator[dict]:
     """Parse PDF file to paragraphs.
 
     Args:
         file_path: Path to PDF file
+        is_priority: Whether this is a priority document
 
     Yields:
         Paragraph dictionaries
@@ -94,18 +99,20 @@ def parse_pdf(file_path: Path) -> Iterator[dict]:
                 "doc_id": doc_id,
                 "para_id": f"p{i+1}",
                 "source_type": "pdf",
-                "source_file": file_path.name
+                "source_file": file_path.name,
+                "is_priority": is_priority
             }
 
     except Exception as e:
         print(f"Error parsing {file_path}: {e}")
 
 
-def parse_docx(file_path: Path) -> Iterator[dict]:
+def parse_docx(file_path: Path, is_priority: bool = False) -> Iterator[dict]:
     """Parse DOCX file to paragraphs.
 
     Args:
         file_path: Path to DOCX file
+        is_priority: Whether this is a priority document
 
     Yields:
         Paragraph dictionaries
@@ -130,18 +137,20 @@ def parse_docx(file_path: Path) -> Iterator[dict]:
                 "doc_id": doc_id,
                 "para_id": f"p{i+1}",
                 "source_type": "docx",
-                "source_file": file_path.name
+                "source_file": file_path.name,
+                "is_priority": is_priority
             }
 
     except Exception as e:
         print(f"Error parsing {file_path}: {e}")
 
 
-def parse_txt(file_path: Path) -> Iterator[dict]:
+def parse_txt(file_path: Path, is_priority: bool = False) -> Iterator[dict]:
     """Parse plain text file to paragraphs.
 
     Args:
         file_path: Path to TXT file
+        is_priority: Whether this is a priority document
 
     Yields:
         Paragraph dictionaries
@@ -160,11 +169,30 @@ def parse_txt(file_path: Path) -> Iterator[dict]:
                 "doc_id": doc_id,
                 "para_id": f"p{i+1}",
                 "source_type": "txt",
-                "source_file": file_path.name
+                "source_file": file_path.name,
+                "is_priority": is_priority
             }
 
     except Exception as e:
         print(f"Error parsing {file_path}: {e}")
+
+
+def collect_files(directory: Path, is_priority: bool = False) -> list[tuple[Path, bool]]:
+    """Collect all document files from a directory.
+
+    Args:
+        directory: Directory to scan
+        is_priority: Whether files in this directory are priority
+
+    Returns:
+        List of (file_path, is_priority) tuples
+    """
+    files = []
+    if directory.exists():
+        for ext in ['*.pdf', '*.docx', '*.txt', '*.PDF', '*.DOCX', '*.TXT']:
+            for f in directory.glob(ext):
+                files.append((f, is_priority))
+    return files
 
 
 def main():
@@ -189,6 +217,7 @@ def main():
 
     input_dir = Path(args.input)
     output_dir = Path(args.output)
+    priority_dir = input_dir / "important_examples"
 
     if not input_dir.exists():
         print(f"Error: Input directory does not exist: {input_dir}")
@@ -200,50 +229,78 @@ def main():
     print("=" * 60)
     print("GSWA Corpus Parser")
     print("=" * 60)
-    print(f"Input: {input_dir}")
+    print(f"Input (regular):  {input_dir}")
+    print(f"Input (priority): {priority_dir}")
     print(f"Output: {output_dir}")
     print()
 
-    # Find all documents
-    pdf_files = list(input_dir.glob("*.pdf"))
-    docx_files = list(input_dir.glob("*.docx"))
-    txt_files = list(input_dir.glob("*.txt"))
-
-    all_files = pdf_files + docx_files + txt_files
+    # Collect files from both directories
+    regular_files = collect_files(input_dir, is_priority=False)
+    priority_files = collect_files(priority_dir, is_priority=True)
+    all_files = regular_files + priority_files
 
     if not all_files:
-        print("No PDF, DOCX, or TXT files found in input directory.")
-        print("\nTo prepare your corpus:")
-        print("1. Collect Gilles's published papers (PDF or DOCX)")
-        print("2. Place them in: ./data/corpus/raw/")
-        print("3. Run this script again")
+        print("No PDF, DOCX, or TXT files found.")
+        print()
+        print("=" * 60)
+        print("📁 Folder Structure Guide")
+        print("=" * 60)
+        print()
+        print("Place your documents in these folders:")
+        print()
+        print("  data/corpus/raw/")
+        print("  └── [Regular articles go here]")
+        print("  │   └── paper1.pdf")
+        print("  │   └── paper2.docx")
+        print("  │")
+        print("  └── important_examples/")
+        print("      └── [Priority articles go here - will have 2.5x weight]")
+        print("      └── best_paper.pdf")
+        print()
+        print("Priority articles (in important_examples/) will be weighted")
+        print("2.5x higher during fine-tuning, helping the model better")
+        print("capture Gilles's preferred writing style.")
         return 1
 
+    # Count files by type and priority
+    regular_count = len(regular_files)
+    priority_count = len(priority_files)
+    pdf_count = sum(1 for f, _ in all_files if f.suffix.lower() == '.pdf')
+    docx_count = sum(1 for f, _ in all_files if f.suffix.lower() == '.docx')
+    txt_count = sum(1 for f, _ in all_files if f.suffix.lower() == '.txt')
+
     print(f"Found {len(all_files)} documents:")
-    print(f"  - PDF: {len(pdf_files)}")
-    print(f"  - DOCX: {len(docx_files)}")
-    print(f"  - TXT: {len(txt_files)}")
+    print(f"  - Regular articles:  {regular_count}")
+    print(f"  - Priority articles: {priority_count} (in important_examples/)")
+    print()
+    print(f"  - PDF: {pdf_count}")
+    print(f"  - DOCX: {docx_count}")
+    print(f"  - TXT: {txt_count}")
     print()
 
     # Process each file
     total_paragraphs = 0
+    priority_paragraphs = 0
     output_file = output_dir / "corpus.jsonl"
 
     with open(output_file, 'w', encoding='utf-8') as f:
-        for file_path in all_files:
-            print(f"Processing: {file_path.name}...")
+        for file_path, is_priority in all_files:
+            priority_marker = " ⭐" if is_priority else ""
+            print(f"Processing: {file_path.name}{priority_marker}...")
 
             if file_path.suffix.lower() == '.pdf':
-                paragraphs = parse_pdf(file_path)
+                paragraphs = parse_pdf(file_path, is_priority)
             elif file_path.suffix.lower() == '.docx':
-                paragraphs = parse_docx(file_path)
+                paragraphs = parse_docx(file_path, is_priority)
             else:
-                paragraphs = parse_txt(file_path)
+                paragraphs = parse_txt(file_path, is_priority)
 
             count = 0
             for para in paragraphs:
                 f.write(json.dumps(para, ensure_ascii=False) + '\n')
                 count += 1
+                if is_priority:
+                    priority_paragraphs += 1
 
             print(f"  Extracted {count} paragraphs")
             total_paragraphs += count
@@ -251,12 +308,16 @@ def main():
     print()
     print("=" * 60)
     print(f"Total paragraphs extracted: {total_paragraphs}")
+    print(f"  - From regular articles:  {total_paragraphs - priority_paragraphs}")
+    print(f"  - From priority articles: {priority_paragraphs} ⭐")
     print(f"Output file: {output_file}")
     print("=" * 60)
     print()
     print("Next steps:")
-    print("1. Build similarity index: python scripts/build_index.py")
-    print("2. Start the server: make run")
+    print("1. Prepare training data: make prepare-training")
+    print("2. Fine-tune model: make finetune-mlx  (Mac)")
+    print("                    make finetune-lora (Linux)")
+    print("3. Or just build index and run: make build-index && make run")
 
     return 0
 

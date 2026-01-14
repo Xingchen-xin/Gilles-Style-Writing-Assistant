@@ -409,56 +409,53 @@ make export-dpo       # 导出 DPO 数据
 
 默认模型可能被 AI 检测器识别为纯 AI 生成。通过微调，模型可以学习 Gilles 的写作风格，使输出更自然、更像人类写作。
 
-### 为什么需要微调？
+### 傻瓜式操作（只需 3 步）
 
-| 问题 | 解决方案 |
-|------|----------|
-| 被 AI 检测器识别 | 微调学习人类写作模式 |
-| 风格不像 Gilles | 使用 Gilles 的论文训练 |
-| 表达过于通用 | 学习特定的学术表达 |
+```
+1. 放文章到文件夹
+   data/corpus/raw/                    <- 普通文章
+   data/corpus/raw/important_examples/ <- 重要文章（自动 2.5x 权重）
 
-### 快速微调（Mac 用户）
+2. 运行一条命令
+   make finetune-all
 
-```bash
-# 1. 配置优先文档权重（可选，使某些文章权重更高）
-# 编辑 data/corpus/priority_weights.json
-
-# 2. 准备训练数据
-make prepare-training
-
-# 3. 安装 MLX
-pip install mlx mlx-lm
-
-# 4. 运行微调
-make finetune-mlx
-
-# 5. 创建 Ollama 模型
-ollama create gswa-gilles -f models/gswa-mlx-*/Modelfile
-
-# 6. 更新配置
-echo "VLLM_MODEL_NAME=gswa-gilles" >> .env
+3. 部署并重启
+   ollama create gswa-gilles -f models/gswa-mlx-*/Modelfile
+   echo "VLLM_MODEL_NAME=gswa-gilles" >> .env
+   make run
 ```
 
-### 设置优先文档
+### 文件夹结构
 
-编辑 `data/corpus/priority_weights.json`，为 Gilles 认为最能代表其风格的文章设置更高权重：
-
-```json
-{
-  "priority_docs": {
-    "Barka_MicrobiolMolBiolRev2016": {"weight": 2.5, "reason": "Review - 最佳风格示例"},
-    "van Wezel_McDowall_NPR2011": {"weight": 2.5, "reason": "经典 Gilles 风格"}
-  }
-}
 ```
+data/corpus/raw/                      <- 普通 Gilles 文章 (权重 1.0x)
+├── paper1.pdf
+├── paper2.docx
+│
+└── important_examples/               <- 重要文章 (自动权重 2.5x)
+    ├── best_review.pdf
+    └── classic_paper.pdf
+```
+
+**支持格式：** `.pdf`, `.docx`, `.txt`
 
 ### 微调方案对比
 
 | 方案 | 平台 | 硬件 | 时间 | 命令 |
 |------|------|------|------|------|
-| **MLX** | Mac | M1/M2/M3 16GB+ | 1-2h | `make finetune-mlx` |
+| **MLX** | Mac | M1/M2/M3 16GB+ | 1-2h | `make finetune-all` |
 | **QLoRA** | Linux | GPU 8GB+ | 3-6h | `make finetune-lora` |
 | **LoRA** | Linux | GPU 16GB+ | 2-4h | 见文档 |
+
+### 常用命令
+
+```bash
+make finetune-all      # 一键完成（解析 + 训练 + 微调）
+make parse-corpus      # 仅解析文章
+make prepare-training  # 仅准备训练数据
+make list-docs         # 列出所有文章 ID
+make training-stats    # 查看训练数据统计
+```
 
 详细文档：[docs/FINETUNING.md](docs/FINETUNING.md)
 
@@ -518,14 +515,18 @@ A: 尝试使用更小的模型：
 
 A:
 ```bash
-# 1. 添加文档到 data/corpus/raw/
+# 1. 添加普通文档
 cp papers/*.pdf data/corpus/raw/
 
-# 2. 解析文档
-python scripts/parse_corpus.py
+# 2. 添加重要/代表性文档（会自动获得 2.5x 权重）
+cp important_papers/*.pdf data/corpus/raw/important_examples/
 
-# 3. 构建索引
-python scripts/build_index.py
+# 3. 解析并构建索引
+make parse-corpus
+make build-index
+
+# 或者直接一键微调（包含解析）
+make finetune-all
 ```
 
 ### Q: 如何完全离线运行？

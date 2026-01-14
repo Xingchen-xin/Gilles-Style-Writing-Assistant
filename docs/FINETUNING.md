@@ -1,4 +1,45 @@
-# GSWA Fine-tuning Guide
+# GSWA Fine-tuning Guide / 微调指南
+
+## TL;DR 傻瓜式操作
+
+```
+只需 3 步：
+
+1. 放文章到文件夹
+   data/corpus/raw/           <- 普通文章放这里
+   data/corpus/raw/important_examples/  <- 重要文章放这里（权重 2.5x）
+
+2. 运行一条命令
+   make finetune-all
+
+3. 重启 GSWA
+   make run
+```
+
+---
+
+## 文件夹结构说明
+
+```
+data/corpus/raw/                      <- 普通 Gilles 文章
+├── paper1.pdf
+├── paper2.docx
+├── paper3.txt
+│
+└── important_examples/               <- 重要/代表性文章 (自动 2.5x 权重)
+    ├── best_review.pdf
+    └── classic_paper.pdf
+```
+
+**权重说明：**
+| 位置 | 自动权重 | 说明 |
+|------|----------|------|
+| `raw/` | 1.0x | 普通文章 |
+| `raw/important_examples/` | 2.5x | 重要文章，训练时出现更多次 |
+
+**支持的文件格式：** `.pdf`, `.docx`, `.txt`
+
+---
 
 ## 为什么需要微调？
 
@@ -15,202 +56,169 @@
 
 | 方案 | 硬件要求 | 训练时间 | 质量 | 难度 | 推荐场景 |
 |------|----------|----------|------|------|----------|
+| **MLX (Mac)** | M1/M2/M3 16GB+ | 1-2小时 | ⭐⭐⭐⭐ | 低 | **Mac 用户首选** |
 | **LoRA** | GPU 16GB+ | 2-4小时 | ⭐⭐⭐⭐ | 中 | Linux 服务器 |
 | **QLoRA** | GPU 8GB+ | 3-6小时 | ⭐⭐⭐ | 中 | 显存有限 |
-| **MLX (Mac)** | M1/M2/M3 16GB+ | 1-2小时 | ⭐⭐⭐⭐ | 低 | Mac 用户推荐 |
 | **Full Fine-tuning** | GPU 48GB+ | 8-24小时 | ⭐⭐⭐⭐⭐ | 高 | 最佳质量 |
-| **RAG 增强** | 无需训练 | 即时 | ⭐⭐⭐ | 低 | 快速部署 |
 
 ---
 
-## 快速开始（Mac 用户）
+## Mac 用户傻瓜式教程
 
-### 第一步：配置优先文档权重
+### 第一步：放入文章
 
-编辑 `data/corpus/priority_weights.json`，设置 Gilles 认为最能代表其风格的文章：
-
-```json
-{
-  "priority_docs": {
-    "Barka_MicrobiolMolBiolRev2016": {
-      "weight": 2.5,
-      "reason": "Comprehensive review - exemplary writing style"
-    },
-    "van Wezel_McDowall_NPR2011": {
-      "weight": 2.5,
-      "reason": "Classic Gilles style"
-    },
-    "vanderMeij_FEMSMicrobiolRev2017": {
-      "weight": 2.0,
-      "reason": "Major review paper"
-    }
-  }
-}
-```
-
-**权重说明：**
-- `1.0` = 正常权重
-- `2.0` = 双倍重要性（训练时出现 2 次）
-- `2.5` = 最高优先级
-- `0.5` = 降低重要性
-
-### 第二步：准备训练数据
+1. 打开 Finder，进入项目目录
+2. 打开 `data/corpus/raw/` 文件夹
+3. 把 Gilles 的 PDF 文章拖进去
+4. 如果有最能代表 Gilles 风格的文章，放入 `raw/important_examples/`
 
 ```bash
-# 生成加权训练数据
-make prepare-training
+# 或者用命令行
+cp ~/Downloads/*.pdf data/corpus/raw/
+
+# 重要文章放这里
+cp ~/Downloads/important_paper.pdf data/corpus/raw/important_examples/
 ```
 
-这会创建 `data/training/alpaca_train.jsonl` 和 `alpaca_val.jsonl`。
-
-### 第三步：安装训练依赖（Mac）
+### 第二步：安装依赖（首次运行）
 
 ```bash
-# 安装 MLX
+# 安装 MLX（Apple Silicon 专用机器学习库）
 pip install mlx mlx-lm
 ```
 
-### 第四步：运行微调
+### 第三步：一键微调
 
 ```bash
-# Mac 用户
-make finetune-mlx
-
-# 或者手动运行
-python scripts/finetune_mlx_mac.py --model mistral --iters 1000
+# 这一条命令完成所有工作：解析文章 → 生成训练数据 → 微调模型
+make finetune-all
 ```
 
-### 第五步：使用微调后的模型
+**看到的输出：**
+```
+============================================================
+GSWA Corpus Parser
+============================================================
+Input (regular):  ./data/corpus/raw
+Input (priority): ./data/corpus/raw/important_examples
+
+Found 15 documents:
+  - Regular articles:  12
+  - Priority articles: 3 (in important_examples/)
+
+Processing: paper1.pdf...
+  Extracted 45 paragraphs
+Processing: best_review.pdf ⭐...
+  Extracted 120 paragraphs
+...
+
+============================================================
+Starting MLX Fine-tuning
+============================================================
+Epoch 1/3: loss=2.45
+Epoch 2/3: loss=1.89
+Epoch 3/3: loss=1.23
+
+Model saved to: models/gswa-mlx-mistral/
+```
+
+### 第四步：创建 Ollama 模型
 
 ```bash
-# 1. 模型会自动创建 Ollama Modelfile
-# 2. 创建 Ollama 模型
-ollama create gswa-gilles -f models/gswa-mlx-*/Modelfile
+# 根据输出的模型路径创建 Ollama 模型
+ollama create gswa-gilles -f models/gswa-mlx-mistral/Modelfile
+```
 
-# 3. 更新 .env
-VLLM_MODEL_NAME=gswa-gilles
+### 第五步：更新配置并运行
 
-# 4. 重启 GSWA
+```bash
+# 更新 .env 使用新模型
+echo "VLLM_MODEL_NAME=gswa-gilles" >> .env
+
+# 重启 GSWA
 make run
 ```
 
+**恭喜！现在 GSWA 使用的是微调后的模型！**
+
 ---
 
-## 详细教程
+## Linux 用户傻瓜式教程
 
-### 1. 语料库优先级设置
+### 第一步：放入文章
 
-Gilles 的论文库中，有些文章更能代表他的写作风格。将这些放入高权重：
+同 Mac 用户，放入 `data/corpus/raw/` 和 `raw/important_examples/`
 
-**放置位置：** `data/corpus/priority_weights.json`
+### 第二步：安装依赖
+
+```bash
+# 安装训练依赖
+make install-train
+```
+
+### 第三步：一键微调
+
+```bash
+# QLoRA 微调（推荐，节省显存）
+make finetune-lora
+```
+
+### 第四步：部署模型
+
+微调完成后，模型保存在 `models/gswa-lora/`。
+
+```bash
+# 使用 PEFT 合并模型（可选）
+python scripts/merge_lora.py
+
+# 或者直接配置 .env 使用 LoRA adapter
+LORA_ADAPTER_PATH=./models/gswa-lora
+```
+
+---
+
+## 手动配置权重（高级）
+
+如果你想精确控制每篇文章的权重，可以编辑 `data/corpus/priority_weights.json`：
 
 ```json
 {
+  "default_weight": 1.0,
+  "priority_folder_weight": 2.5,
+
   "priority_docs": {
-    "最能代表风格的文章ID": {
-      "weight": 2.5,
-      "reason": "说明为什么这篇最能代表 Gilles 风格"
+    "Barka_MicrobiolMolBiolRev2016": {
+      "weight": 3.0,
+      "reason": "最能代表 Gilles 风格的综述"
     }
   },
+
   "exclude_docs": {
-    "不代表风格的文章ID": {
-      "reason": "为什么排除"
+    "some_bad_paper": {
+      "reason": "太短，不能代表风格"
     }
   }
 }
 ```
 
-**如何确定文章 ID？**
+**查看所有文章 ID：**
 ```bash
-# 查看所有文章 ID
-python3 << 'EOF'
-import json
-with open('data/corpus/parsed/corpus.jsonl') as f:
-    docs = set()
-    for line in f:
-        d = json.loads(line)
-        docs.add(d['doc_id'])
-    for doc in sorted(docs):
-        print(doc)
-EOF
-```
-
-### 2. 训练数据格式
-
-脚本支持多种格式：
-
-| 格式 | 用途 | 命令 |
-|------|------|------|
-| Alpaca | 通用微调 | `--format alpaca` |
-| ShareGPT | Axolotl 等 | `--format sharegpt` |
-| Completion | 继续预训练 | `--format completion` |
-| DPO | 偏好学习 | `--format dpo --from-feedback` |
-
-```bash
-# 生成所有格式
-python scripts/prepare_training_data.py --format all --weighted --split
-```
-
-### 3. Linux GPU 微调 (LoRA/QLoRA)
-
-```bash
-# 安装依赖
-make install-train
-
-# 准备数据
-make prepare-training
-
-# QLoRA 微调（推荐，节省显存）
-python scripts/finetune_lora.py \
-    --base-model mistralai/Mistral-7B-Instruct-v0.2 \
-    --quantize 4bit \
-    --epochs 3 \
-    --batch-size 4
-
-# 全精度 LoRA（更高质量）
-python scripts/finetune_lora.py \
-    --base-model mistralai/Mistral-7B-Instruct-v0.2 \
-    --quantize none \
-    --epochs 3
-```
-
-### 4. Mac MLX 微调
-
-```bash
-# 安装 MLX
-pip install mlx mlx-lm
-
-# 运行微调
-python scripts/finetune_mlx_mac.py \
-    --model mistral \
-    --batch-size 4 \
-    --lora-layers 16 \
-    --iters 1000
+make list-docs
 ```
 
 ---
 
-## 高级：DPO 训练（偏好对齐）
-
-DPO (Direct Preference Optimization) 使用用户反馈来进一步优化模型。
-
-### 收集反馈
-
-1. 使用 GSWA 生成变体
-2. 在 UI 中为变体评分（Best/Good/Bad）
-3. 提交反馈
-
-### 导出 DPO 数据
+## 完整 Makefile 命令
 
 ```bash
-make export-dpo
-```
+make parse-corpus      # 解析 raw/ 中的文章
+make prepare-training  # 生成训练数据
+make finetune-mlx      # Mac MLX 微调
+make finetune-lora     # Linux LoRA 微调
+make finetune-all      # 一键完成所有步骤
 
-### 运行 DPO 训练
-
-```bash
-python scripts/prepare_training_data.py --format dpo --from-feedback
-python scripts/finetune_lora.py --training-data ./data/training/dpo.jsonl
+make list-docs         # 列出所有文章 ID
+make training-stats    # 查看训练数据统计
 ```
 
 ---
@@ -219,7 +227,13 @@ python scripts/finetune_lora.py --training-data ./data/training/dpo.jsonl
 
 微调后的模型会更好地模仿人类写作风格，但还可以采取以下措施：
 
-### 1. 调整生成参数
+### 1. 使用高质量语料
+
+- 放入更多 Gilles 的文章（越多越好）
+- 把最能代表风格的放入 `important_examples/`
+- 排除不典型的文章
+
+### 2. 调整生成参数
 
 在 `.env` 中设置：
 ```bash
@@ -227,15 +241,7 @@ TEMPERATURE_BASE=0.4      # 略高的温度增加变化
 TEMPERATURE_VARIANCE=0.2  # 变体间更大差异
 ```
 
-### 2. 使用更多样的 Prompt
-
-系统会自动使用不同的重写策略（A/B/C/D）。
-
-### 3. 启用回退重写
-
-确保相似度检测开启，避免与语料库过于相似。
-
-### 4. 后处理
+### 3. 后处理
 
 - 轻微编辑生成的文本
 - 添加个人表达
@@ -243,7 +249,33 @@ TEMPERATURE_VARIANCE=0.2  # 变体间更大差异
 
 ---
 
+## DPO 进阶训练（偏好对齐）
+
+使用后，你可以通过反馈进一步优化：
+
+1. 使用 GSWA 生成变体
+2. 在 UI 中为变体评分（Best/Good/Bad）
+3. 提交反馈
+4. 导出并训练：
+
+```bash
+make export-dpo
+python scripts/prepare_training_data.py --format dpo --from-feedback
+make finetune-lora
+```
+
+---
+
 ## 故障排除
+
+### Q: 没有检测到文章？
+
+A: 检查文件位置和格式：
+```bash
+ls data/corpus/raw/
+ls data/corpus/raw/important_examples/
+```
+确保是 `.pdf`, `.docx`, 或 `.txt` 文件。
 
 ### Q: MLX 训练太慢？
 
@@ -263,39 +295,14 @@ python scripts/finetune_lora.py --quantize 4bit --batch-size 2
 
 A: 可能是过拟合，尝试：
 - 减少训练轮数
-- 增加 dropout
-- 使用更多验证数据
+- 增加更多文章
+- 使用验证集
 
 ### Q: 如何回滚到原模型？
 
 A: 修改 `.env`：
 ```bash
 VLLM_MODEL_NAME=mistral  # 使用原始模型
-```
-
----
-
-## 推荐工作流程
-
-```
-1. 配置优先文档权重
-   └── 编辑 data/corpus/priority_weights.json
-
-2. 准备训练数据
-   └── make prepare-training
-
-3. 微调模型
-   ├── Mac: make finetune-mlx
-   └── Linux: make finetune-lora
-
-4. 部署微调模型
-   └── ollama create gswa-gilles -f Modelfile
-
-5. 使用并收集反馈
-   └── 在 UI 中评分变体
-
-6. DPO 迭代优化
-   └── make export-dpo && 重新训练
 ```
 
 ---

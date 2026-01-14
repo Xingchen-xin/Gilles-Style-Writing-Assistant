@@ -1,4 +1,4 @@
-.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup-mac setup-ollama prepare-training finetune-lora finetune-mlx finetune-all finetune-smart list-docs training-stats check-deps check-mlx check-lora corpus corpus-add corpus-guide corpus-validate
+.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup-mac setup-ollama prepare-training finetune-lora finetune-mlx finetune-all finetune-smart list-docs training-stats check-deps check-mlx check-lora corpus corpus-add corpus-guide corpus-validate train train-auto train-model status models
 
 # Default target
 help:
@@ -34,9 +34,16 @@ help:
 	@echo "  parse-corpus      - Parse PDF/DOCX files to JSONL"
 	@echo "  build-index       - Build similarity index from corpus"
 	@echo ""
-	@echo "  === Fine-tuning (微调训练) ==="
-	@echo "  finetune-smart    - 🚀 One-click smart training (auto-detect platform)"
-	@echo "  finetune-all      - One-click: parse + train + finetune (Mac)"
+	@echo "  === Training Wizard (Recommended) ==="
+	@echo "  train             - One-click training wizard (interactive)"
+	@echo "  train-auto        - Fully automatic training (no prompts)"
+	@echo "  train-model       - Train with specific model (MODEL=qwen-7b)"
+	@echo "  status            - Show corpus and training status"
+	@echo "  models            - List available models"
+	@echo ""
+	@echo "  === Fine-tuning (Advanced) ==="
+	@echo "  finetune-smart    - Smart training (auto-detect platform)"
+	@echo "  finetune-all      - Full pipeline: parse + train + finetune (Mac)"
 	@echo "  prepare-training  - Prepare training data from corpus"
 	@echo "  finetune-lora     - Fine-tune with LoRA (Linux/Windows/GPU)"
 	@echo "  finetune-mlx      - Fine-tune with MLX (Mac Apple Silicon)"
@@ -205,6 +212,35 @@ corpus-guide:
 # Validate all corpus files
 corpus-validate:
 	python scripts/corpus_manager.py --validate
+
+# ==================
+# Training Wizard (One-Click Training)
+# ==================
+
+# One-click training wizard (recommended)
+train:
+	python scripts/training_wizard.py
+
+# Fully automatic training (no confirmation)
+train-auto:
+	python scripts/training_wizard.py --auto
+
+# Train with specific model
+# Usage: make train-model MODEL=qwen-7b
+train-model:
+	@echo "Usage: make train-model MODEL=qwen-7b"
+	@echo "Available models: qwen-7b, qwen-14b, qwen-1.5b, llama3-8b, mistral-7b, phi-3.5"
+ifdef MODEL
+	python scripts/training_wizard.py --model $(MODEL) --auto
+endif
+
+# Show status (combines corpus + training stats)
+status:
+	python scripts/training_wizard.py --status
+
+# List available models
+models:
+	python scripts/training_wizard.py --models
 
 # ==================
 # Utilities

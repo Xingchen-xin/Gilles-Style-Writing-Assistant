@@ -405,6 +405,65 @@ make export-dpo       # 导出 DPO 数据
 
 ---
 
+## 微调模型（减少 AI 检测）
+
+默认模型可能被 AI 检测器识别为纯 AI 生成。通过微调，模型可以学习 Gilles 的写作风格，使输出更自然、更像人类写作。
+
+### 为什么需要微调？
+
+| 问题 | 解决方案 |
+|------|----------|
+| 被 AI 检测器识别 | 微调学习人类写作模式 |
+| 风格不像 Gilles | 使用 Gilles 的论文训练 |
+| 表达过于通用 | 学习特定的学术表达 |
+
+### 快速微调（Mac 用户）
+
+```bash
+# 1. 配置优先文档权重（可选，使某些文章权重更高）
+# 编辑 data/corpus/priority_weights.json
+
+# 2. 准备训练数据
+make prepare-training
+
+# 3. 安装 MLX
+pip install mlx mlx-lm
+
+# 4. 运行微调
+make finetune-mlx
+
+# 5. 创建 Ollama 模型
+ollama create gswa-gilles -f models/gswa-mlx-*/Modelfile
+
+# 6. 更新配置
+echo "VLLM_MODEL_NAME=gswa-gilles" >> .env
+```
+
+### 设置优先文档
+
+编辑 `data/corpus/priority_weights.json`，为 Gilles 认为最能代表其风格的文章设置更高权重：
+
+```json
+{
+  "priority_docs": {
+    "Barka_MicrobiolMolBiolRev2016": {"weight": 2.5, "reason": "Review - 最佳风格示例"},
+    "van Wezel_McDowall_NPR2011": {"weight": 2.5, "reason": "经典 Gilles 风格"}
+  }
+}
+```
+
+### 微调方案对比
+
+| 方案 | 平台 | 硬件 | 时间 | 命令 |
+|------|------|------|------|------|
+| **MLX** | Mac | M1/M2/M3 16GB+ | 1-2h | `make finetune-mlx` |
+| **QLoRA** | Linux | GPU 8GB+ | 3-6h | `make finetune-lora` |
+| **LoRA** | Linux | GPU 16GB+ | 2-4h | 见文档 |
+
+详细文档：[docs/FINETUNING.md](docs/FINETUNING.md)
+
+---
+
 ## 常见问题
 
 ### Q: Mac 上 Ollama 无法启动？

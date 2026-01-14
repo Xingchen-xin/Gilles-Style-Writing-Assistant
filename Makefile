@@ -1,4 +1,4 @@
-.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup-mac setup-ollama
+.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup-mac setup-ollama prepare-training finetune-lora finetune-mlx
 
 # Default target
 help:
@@ -9,6 +9,7 @@ help:
 	@echo "  === Installation ==="
 	@echo "  install        - Install core dependencies"
 	@echo "  dev            - Install development dependencies"
+	@echo "  install-train  - Install training dependencies (LoRA)"
 	@echo ""
 	@echo "  === Mac Setup (Apple Silicon) ==="
 	@echo "  setup-mac      - Complete Mac setup with Ollama"
@@ -30,8 +31,11 @@ help:
 	@echo "  parse-corpus   - Parse PDF/DOCX files to JSONL"
 	@echo "  build-index    - Build similarity index from corpus"
 	@echo ""
-	@echo "  === Training Data ==="
-	@echo "  export-dpo     - Export feedback data for DPO training"
+	@echo "  === Fine-tuning (Gilles Style) ==="
+	@echo "  prepare-training  - Prepare training data from corpus"
+	@echo "  finetune-lora     - Fine-tune with LoRA (Linux/GPU)"
+	@echo "  finetune-mlx      - Fine-tune with MLX (Mac Apple Silicon)"
+	@echo "  export-dpo        - Export feedback for DPO training"
 	@echo ""
 	@echo "  === Utilities ==="
 	@echo "  clean          - Clean build artifacts"
@@ -43,6 +47,14 @@ install:
 # Install dev dependencies
 dev:
 	pip install -e ".[dev,similarity]"
+
+# Install training dependencies
+install-train:
+	pip install torch transformers peft datasets accelerate bitsandbytes
+
+# Install MLX training dependencies (Mac only)
+install-mlx:
+	pip install mlx mlx-lm
 
 # Run tests
 test:
@@ -102,8 +114,20 @@ parse-corpus:
 	python scripts/parse_corpus.py
 
 # ==================
-# Training Data
+# Fine-tuning
 # ==================
+
+# Prepare training data from corpus (with priority weights)
+prepare-training:
+	python scripts/prepare_training_data.py --format alpaca --weighted --split
+
+# Fine-tune with LoRA (Linux with NVIDIA GPU)
+finetune-lora: prepare-training
+	python scripts/finetune_lora.py --quantize 4bit
+
+# Fine-tune with MLX (Mac Apple Silicon)
+finetune-mlx: prepare-training
+	python scripts/finetune_mlx_mac.py --model mistral
 
 # Export feedback data for DPO training
 export-dpo:

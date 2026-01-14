@@ -19,6 +19,12 @@ from gswa.config import get_settings
 logger = logging.getLogger(__name__)
 
 
+def estimate_token_count(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, (len(text) + 3) // 4)
+
+
 class RewriterService:
     """Orchestrates the rewriting process."""
 
@@ -148,6 +154,159 @@ class RewriterService:
             model_version=f"{self.settings.vllm_model_name}@v1",
             processing_time_ms=processing_time,
         )
+
+    async def rewrite_stream(self, request: RewriteRequest):
+        """Rewrite text with streaming progress events."""
+        start_time = time.time()
+        strategies = self.prompt_service.get_strategies(
+            request.strategies,
+            request.n_variants
+        )
+        total_variants = len(strategies)
+        max_tokens = self.settings.max_new_tokens
+        variants: list[RewriteVariant] = []
+
+        for i, strategy in enumerate(strategies):
+            yield {
+                "type": "variant_start",
+                "variant_index": i,
+                "variant_total": total_variants,
+                "strategy": strategy.value,
+            }
+
+            system_prompt = self.prompt_service.build_system_prompt(
+                section=request.section,
+                is_fallback=False,
+            )
+            user_prompt = self.prompt_service.build_user_prompt(
+                text=request.text,
+                strategy=strategy,
+            )
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+
+            temp = self.settings.temperature_base + (i - total_variants // 2) * self.settings.temperature_variance
+            temp = max(0.1, min(1.0, temp))
+
+            tokens_generated = 0
+            parts: list[str] = []
+            async for delta in self.llm_client.stream_complete(
+                messages=messages,
+                temperature=temp,
+                max_tokens=max_tokens,
+            ):
+                parts.append(delta)
+                tokens_generated += estimate_token_count(delta)
+                variant_progress = min(tokens_generated / max_tokens, 1.0) if max_tokens else 0.0
+                overall_progress = min((i + variant_progress) / total_variants, 1.0)
+                yield {
+                    "type": "progress",
+                    "variant_index": i,
+                    "variant_total": total_variants,
+                    "tokens_generated": tokens_generated,
+                    "tokens_target": max_tokens,
+                    "variant_progress": variant_progress,
+                    "overall_progress": overall_progress,
+                    "is_fallback": False,
+                }
+
+            generated_text = "".join(parts)
+            should_fallback, scores = self.similarity_service.check_similarity(generated_text)
+
+            fallback = False
+            fallback_reason = None
+
+            if should_fallback:
+                fallback = True
+                fallback_reason = self._get_fallback_reason(scores)
+                yield {
+                    "type": "status",
+                    "message": f"Fallback triggered for variant {i + 1}, regenerating...",
+                    "variant_index": i,
+                }
+
+                system_prompt = self.prompt_service.build_system_prompt(
+                    section=request.section,
+                    is_fallback=True,
+                )
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ]
+
+                tokens_generated = 0
+                parts = []
+                yield {
+                    "type": "progress",
+                    "variant_index": i,
+                    "variant_total": total_variants,
+                    "tokens_generated": tokens_generated,
+                    "tokens_target": max_tokens,
+                    "variant_progress": 0.0,
+                    "overall_progress": min(i / total_variants, 1.0),
+                    "is_fallback": True,
+                }
+
+                async for delta in self.llm_client.stream_complete(
+                    messages=messages,
+                    temperature=temp + 0.1,
+                    max_tokens=max_tokens,
+                ):
+                    parts.append(delta)
+                    tokens_generated += estimate_token_count(delta)
+                    variant_progress = min(tokens_generated / max_tokens, 1.0) if max_tokens else 0.0
+                    overall_progress = min((i + variant_progress) / total_variants, 1.0)
+                    yield {
+                        "type": "progress",
+                        "variant_index": i,
+                        "variant_total": total_variants,
+                        "tokens_generated": tokens_generated,
+                        "tokens_target": max_tokens,
+                        "variant_progress": variant_progress,
+                        "overall_progress": overall_progress,
+                        "is_fallback": True,
+                    }
+
+                generated_text = "".join(parts)
+                _, scores = self.similarity_service.check_similarity(generated_text)
+
+            yield {
+                "type": "progress",
+                "variant_index": i,
+                "variant_total": total_variants,
+                "tokens_generated": max_tokens,
+                "tokens_target": max_tokens,
+                "variant_progress": 1.0,
+                "overall_progress": min((i + 1) / total_variants, 1.0),
+                "is_fallback": fallback,
+            }
+
+            variants.append(RewriteVariant(
+                text=generated_text.strip(),
+                strategy=strategy,
+                scores=SimilarityScores(
+                    ngram_max_match=scores["ngram_max_match"],
+                    ngram_overlap=scores["ngram_overlap"],
+                    embed_top1=scores["embed_top1"],
+                    top1_doc_id=scores.get("top1_doc_id"),
+                    top1_para_id=scores.get("top1_para_id"),
+                ),
+                fallback=fallback,
+                fallback_reason=fallback_reason,
+            ))
+
+        processing_time = int((time.time() - start_time) * 1000)
+        response = RewriteResponse(
+            variants=variants,
+            model_version=f"{self.settings.vllm_model_name}@v1",
+            processing_time_ms=processing_time,
+        )
+        yield {
+            "type": "result",
+            "data": response.model_dump(mode="json"),
+        }
 
     def _get_fallback_reason(self, scores: dict) -> str:
         """Generate human-readable fallback reason.

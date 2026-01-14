@@ -21,6 +21,9 @@ const metaInfo = document.getElementById('meta-info');
 const loading = document.getElementById('loading');
 const errorDiv = document.getElementById('error');
 const healthStatus = document.getElementById('health-status');
+const progressBar = document.getElementById('progress-bar');
+const progressText = document.getElementById('progress-text');
+const progressSubtext = document.getElementById('progress-subtext');
 
 // Strategy descriptions
 const STRATEGY_DESCRIPTIONS = {
@@ -33,6 +36,58 @@ const STRATEGY_DESCRIPTIONS = {
 // Generate unique session ID
 function generateSessionId() {
     return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+function resetProgress() {
+    progressBar.style.width = '0%';
+    progressText.textContent = 'Starting...';
+    progressSubtext.textContent = '';
+}
+
+function updateProgress(event) {
+    const overall = Math.round((event.overall_progress || 0) * 100);
+    progressBar.style.width = `${overall}%`;
+    progressText.textContent = `Generating variants... ${overall}%`;
+
+    const variantIndex = (event.variant_index ?? 0) + 1;
+    const variantTotal = event.variant_total ?? 1;
+    const tokensGenerated = event.tokens_generated ?? 0;
+    const tokensTarget = event.tokens_target ?? 0;
+    const fallbackFlag = event.is_fallback ? ' | Fallback' : '';
+    progressSubtext.textContent = `Variant ${variantIndex}/${variantTotal} | ${tokensGenerated}/${tokensTarget} tokens${fallbackFlag}`;
+}
+
+async function streamSse(resp, onEvent) {
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+            break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        const chunks = buffer.split('\n\n');
+        buffer = chunks.pop() || '';
+
+        for (const chunk of chunks) {
+            const line = chunk.split('\n').find((l) => l.startsWith('data: '));
+            if (!line) {
+                continue;
+            }
+            const dataStr = line.slice(6).trim();
+            if (!dataStr) {
+                continue;
+            }
+            try {
+                const event = JSON.parse(dataStr);
+                onEvent(event);
+            } catch {
+                // Ignore malformed chunks
+            }
+        }
+    }
 }
 
 // Check health on load
@@ -92,6 +147,9 @@ async function generateVariants() {
     errorDiv.classList.add('hidden');
     generateBtn.disabled = true;
 
+    resetProgress();
+    let gotResult = false;
+
     try {
         const payload = {
             text: text,
@@ -102,32 +160,58 @@ async function generateVariants() {
             payload.section = sectionSelect.value;
         }
 
-        const resp = await fetch(`${API_BASE}/rewrite/variants`, {
+        const resp = await fetch(`${API_BASE}/rewrite/variants/stream`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'text/event-stream'
+            },
             body: JSON.stringify(payload),
         });
 
         if (!resp.ok) {
-            const errData = await resp.json();
-            throw new Error(errData.detail || 'API error');
+            const errText = await resp.text();
+            throw new Error(errText || 'API error');
         }
 
-        const data = await resp.json();
-
-        // Store session for feedback
-        currentSession = {
-            id: generateSessionId(),
-            inputText: text,
-            section: sectionSelect.value || null,
-            variants: data.variants
-        };
-
-        displayResults(data);
-
+        await streamSse(resp, (event) => {
+            if (event.type === 'variant_start') {
+                const variantIndex = (event.variant_index ?? 0) + 1;
+                const variantTotal = event.variant_total ?? 1;
+                progressText.textContent = `Generating variant ${variantIndex}/${variantTotal}...`;
+                return;
+            }
+            if (event.type === 'progress') {
+                updateProgress(event);
+                return;
+            }
+            if (event.type === 'status') {
+                progressText.textContent = event.message || 'Regenerating...';
+                return;
+            }
+            if (event.type === 'result') {
+                gotResult = true;
+                const data = event.data;
+                currentSession = {
+                    id: generateSessionId(),
+                    inputText: text,
+                    section: sectionSelect.value || null,
+                    variants: data.variants
+                };
+                displayResults(data);
+                loading.classList.add('hidden');
+                generateBtn.disabled = false;
+                return;
+            }
+            if (event.type === 'error') {
+                throw new Error(event.message || 'Streaming error');
+            }
+        });
+        if (!gotResult) {
+            throw new Error('Stream ended without result');
+        }
     } catch (e) {
         showError(`Error: ${e.message}`);
-    } finally {
         loading.classList.add('hidden');
         generateBtn.disabled = false;
     }

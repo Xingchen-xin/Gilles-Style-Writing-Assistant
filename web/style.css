@@ -252,6 +252,33 @@ select:focus {
     margin: 0 auto 15px;
 }
 
+.progress-track {
+    width: 100%;
+    max-width: 480px;
+    height: 10px;
+    background: #e9ecef;
+    border-radius: 999px;
+    margin: 0 auto 12px;
+    overflow: hidden;
+}
+
+.progress-bar {
+    height: 100%;
+    width: 0%;
+    background: #3498db;
+    transition: width 0.2s ease;
+}
+
+.progress-text {
+    font-weight: 500;
+    margin-bottom: 4px;
+}
+
+.progress-subtext {
+    color: #666;
+    font-size: 0.9rem;
+}
+
 @keyframes spin {
     0% { transform: rotate(0deg); }
     100% { transform: rotate(360deg); }

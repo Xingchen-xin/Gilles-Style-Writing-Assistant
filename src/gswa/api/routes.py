@@ -2,8 +2,10 @@
 
 FastAPI route definitions for GSWA.
 """
+import json
 import logging
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 
 from gswa.api.schemas import (
     RewriteRequest, RewriteResponse,
@@ -65,6 +67,25 @@ async def rewrite_variants(request: RewriteRequest):
     except Exception as e:
         logger.exception("Error in rewrite_variants")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/rewrite/variants/stream")
+async def rewrite_variants_stream(request: RewriteRequest):
+    """Generate rewrite variants with streaming progress."""
+    async def event_generator():
+        try:
+            rewriter = await get_rewriter_service()
+            async for event in rewriter.rewrite_stream(request):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as e:
+            logger.exception("Error in rewrite_variants_stream")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @router.post("/reply", response_model=ReplyResponse)

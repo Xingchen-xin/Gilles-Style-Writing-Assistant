@@ -4,6 +4,7 @@ Uses OpenAI-compatible API to communicate with local LLM servers.
 Supports multiple backends: vLLM, Ollama, LM Studio.
 """
 import httpx
+import json
 import logging
 from typing import Optional
 from urllib.parse import urlparse
@@ -125,6 +126,65 @@ class LLMClient:
             data = resp.json()
 
         return data["choices"][0]["message"]["content"]
+
+    async def stream_complete(
+        self,
+        messages: list[dict],
+        temperature: float = 0.3,
+        max_tokens: int = 1024,
+        stop: Optional[list[str]] = None,
+    ):
+        """Stream completion deltas from LLM server.
+
+        Args:
+            messages: Chat messages [{"role": "...", "content": "..."}]
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens to generate
+            stop: Stop sequences
+
+        Yields:
+            Delta text chunks
+        """
+        payload = {
+            "model": self._model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+        if stop:
+            payload["stop"] = stop
+
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream(
+                "POST",
+                f"{self._base_url}/chat/completions",
+                json=payload,
+                headers={"Authorization": f"Bearer {self.settings.vllm_api_key}"},
+            ) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line:
+                        continue
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[6:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = data.get("choices", [])
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    delta = (
+                        choice.get("delta", {}).get("content")
+                        or choice.get("message", {}).get("content")
+                    )
+                    if delta:
+                        yield delta
 
     async def generate_variants(
         self,

@@ -65,7 +65,7 @@ def create_app() -> FastAPI:
     app.include_router(router)
 
     # Serve static files (web UI)
-    web_dir = Path(__file__).parent.parent.parent.parent / "web"
+    web_dir = Path(__file__).parent.parent.parent / "web"
     if web_dir.exists():
         app.mount("/", StaticFiles(directory=str(web_dir), html=True), name="web")
         logger.info(f"Serving web UI from {web_dir}")

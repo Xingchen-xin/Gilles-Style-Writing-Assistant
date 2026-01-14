@@ -60,7 +60,11 @@
 
             <div id="loading" class="loading hidden">
                 <div class="spinner"></div>
-                <p>Generating variants...</p>
+                <div class="progress-track">
+                    <div id="progress-bar" class="progress-bar"></div>
+                </div>
+                <p id="progress-text" class="progress-text">Generating variants...</p>
+                <p id="progress-subtext" class="progress-subtext"></p>
             </div>
 
             <div id="error" class="error hidden"></div>

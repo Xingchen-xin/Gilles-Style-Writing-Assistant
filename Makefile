@@ -1,4 +1,4 @@
-.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup-mac setup-ollama prepare-training finetune-lora finetune-mlx finetune-all list-docs training-stats
+.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup-mac setup-ollama prepare-training finetune-lora finetune-mlx finetune-all list-docs training-stats check-deps check-mlx check-lora
 
 # Default target
 help:
@@ -39,6 +39,8 @@ help:
 	@echo "  export-dpo        - Export feedback for DPO training"
 	@echo "  list-docs         - List all document IDs in corpus"
 	@echo "  training-stats    - Show training data statistics"
+	@echo "  check-mlx         - Check MLX dependencies (Mac)"
+	@echo "  check-lora        - Check LoRA dependencies (Linux)"
 	@echo ""
 	@echo "  === Utilities ==="
 	@echo "  clean          - Clean build artifacts"
@@ -159,6 +161,14 @@ training-stats:
 	@echo ""
 	@echo "=== Training Data ==="
 	@if [ -f data/training/alpaca_train.jsonl ]; then wc -l data/training/alpaca_*.jsonl; else echo "No training data found. Run: make prepare-training"; fi
+
+# Check MLX dependencies (Mac)
+check-mlx:
+	python scripts/finetune_mlx_mac.py --check-only
+
+# Check LoRA dependencies (Linux)
+check-lora:
+	python scripts/finetune_lora.py --check-only
 
 # ==================
 # Utilities

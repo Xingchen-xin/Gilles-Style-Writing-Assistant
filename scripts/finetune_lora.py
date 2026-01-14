@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
 """
-LoRA Fine-tuning Script for GSWA.
+LoRA Fine-tuning Script for GSWA (Linux/NVIDIA GPU).
 
 This script fine-tunes a base model on Gilles's writing style using LoRA.
-Supports multiple backends and configurations.
+Optimized for Linux servers with NVIDIA GPUs.
 
 Requirements:
-    pip install transformers peft datasets accelerate bitsandbytes
+    pip install torch transformers peft datasets accelerate bitsandbytes
 
 Usage:
     # Basic usage (Linux with NVIDIA GPU)
     python scripts/finetune_lora.py --base-model mistralai/Mistral-7B-Instruct-v0.2
 
-    # With specific training data
-    python scripts/finetune_lora.py --training-data ./data/training/alpaca.jsonl
-
-    # Mac with MLX (Apple Silicon)
-    python scripts/finetune_lora.py --backend mlx --base-model mlx-community/Mistral-7B-Instruct-v0.2
-
-    # 4-bit quantized (lower memory)
+    # 4-bit quantized (lower memory, recommended)
     python scripts/finetune_lora.py --quantize 4bit
+
+    # With custom training data
+    python scripts/finetune_lora.py --training-data ./data/training/alpaca_train.jsonl
 """
 import argparse
 import json
@@ -29,36 +26,168 @@ from pathlib import Path
 from datetime import datetime
 
 
+# ==============================================================================
+# Dependency Checking
+# ==============================================================================
+
 def check_dependencies():
     """Check if required dependencies are installed."""
+    print("\n" + "=" * 60)
+    print("Checking Dependencies")
+    print("=" * 60)
+
+    deps = {
+        "torch": None,
+        "transformers": None,
+        "peft": None,
+        "datasets": None,
+        "accelerate": None,
+    }
+
     missing = []
+
+    for dep in deps:
+        try:
+            module = __import__(dep)
+            version = getattr(module, '__version__', 'unknown')
+            deps[dep] = version
+            print(f"  {dep}: {version}")
+        except ImportError:
+            missing.append(dep)
+            print(f"  {dep}: NOT INSTALLED")
+
+    # Check CUDA
     try:
         import torch
-    except ImportError:
-        missing.append("torch")
-
-    try:
-        import transformers
-    except ImportError:
-        missing.append("transformers")
-
-    try:
-        import peft
-    except ImportError:
-        missing.append("peft")
-
-    try:
-        import datasets
-    except ImportError:
-        missing.append("datasets")
+        if torch.cuda.is_available():
+            print(f"\n  CUDA available: Yes")
+            print(f"  GPU: {torch.cuda.get_device_name(0)}")
+            print(f"  GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        else:
+            print(f"\n  CUDA available: No (will use CPU, very slow)")
+    except Exception:
+        pass
 
     if missing:
-        print("Missing dependencies:")
-        for dep in missing:
-            print(f"  - {dep}")
-        print("\nInstall with:")
-        print("  pip install torch transformers peft datasets accelerate bitsandbytes")
-        sys.exit(1)
+        print(f"\n  Missing: {', '.join(missing)}")
+        print("\n  Install with:")
+        print("    pip install torch transformers peft datasets accelerate bitsandbytes")
+        return False
+
+    print("\n  Status: Ready for training")
+    return True
+
+
+def check_training_data(path: str) -> bool:
+    """Check if training data exists and is valid."""
+    data_path = Path(path)
+
+    if not data_path.exists():
+        print(f"\nERROR: Training data not found: {path}")
+        print("\nGenerate training data first:")
+        print("  1. Put PDF files in data/corpus/raw/")
+        print("  2. Run: make parse-corpus")
+        print("  3. Run: make prepare-training")
+        return False
+
+    # Count entries
+    count = 0
+    try:
+        with open(data_path, 'r') as f:
+            for line in f:
+                if line.strip():
+                    count += 1
+    except Exception as e:
+        print(f"\nERROR: Cannot read training data: {e}")
+        return False
+
+    if count < 10:
+        print(f"\nWARNING: Training data has only {count} entries.")
+        print("         Consider adding more corpus documents for better results.")
+
+    print(f"\nTraining data: {path}")
+    print(f"  Entries: {count}")
+    return True
+
+
+# ==============================================================================
+# Model Version Management
+# ==============================================================================
+
+def get_model_version_dir(base_dir: str, model_name: str) -> Path:
+    """Create versioned model directory with metadata."""
+    base_path = Path(base_dir)
+    base_path.mkdir(parents=True, exist_ok=True)
+
+    # Create timestamped directory
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    version_name = f"gswa-lora-{model_name}-{timestamp}"
+    version_dir = base_path / version_name
+
+    # Check for existing models and get next version number
+    existing = list(base_path.glob(f"gswa-lora-{model_name}-*"))
+    version_num = len(existing) + 1
+
+    version_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create version metadata
+    metadata = {
+        "version": version_num,
+        "version_name": version_name,
+        "model_name": model_name,
+        "created_at": datetime.now().isoformat(),
+        "status": "training",
+        "framework": "transformers+peft",
+    }
+
+    with open(version_dir / "metadata.json", 'w') as f:
+        json.dump(metadata, f, indent=2)
+
+    return version_dir
+
+
+def update_model_metadata(version_dir: Path, updates: dict):
+    """Update model metadata file."""
+    metadata_file = version_dir / "metadata.json"
+
+    if metadata_file.exists():
+        with open(metadata_file, 'r') as f:
+            metadata = json.load(f)
+    else:
+        metadata = {}
+
+    metadata.update(updates)
+    metadata["updated_at"] = datetime.now().isoformat()
+
+    with open(metadata_file, 'w') as f:
+        json.dump(metadata, f, indent=2)
+
+
+def create_model_registry(base_dir: str):
+    """Create/update model registry file."""
+    base_path = Path(base_dir)
+    registry_file = base_path / "registry.json"
+
+    models = []
+    for model_dir in sorted(base_path.glob("gswa-lora-*")):
+        if model_dir.is_dir():
+            metadata_file = model_dir / "metadata.json"
+            if metadata_file.exists():
+                with open(metadata_file, 'r') as f:
+                    metadata = json.load(f)
+                    metadata["path"] = str(model_dir)
+                    models.append(metadata)
+
+    registry = {
+        "updated_at": datetime.now().isoformat(),
+        "models": models,
+        "latest": models[-1]["version_name"] if models else None,
+    }
+
+    with open(registry_file, 'w') as f:
+        json.dump(registry, f, indent=2)
+
+    return registry
 
 
 def train_with_transformers(args):
@@ -192,8 +321,29 @@ def train_with_transformers(args):
     print(f"  Training samples: {len(train_dataset)}")
     print(f"  Evaluation samples: {len(eval_dataset)}")
 
-    # Training arguments
-    output_dir = Path(args.output_dir) / f"gswa-lora-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    # Create versioned output directory
+    model_short = args.base_model.split("/")[-1].split("-")[0]
+    output_dir = get_model_version_dir(args.output_dir, model_short)
+    print(f"\n  Output directory: {output_dir}")
+
+    # Save training config
+    training_config = {
+        "base_model": args.base_model,
+        "model_short": model_short,
+        "training_data": args.training_data,
+        "lora_r": args.lora_r,
+        "lora_alpha": args.lora_alpha,
+        "lora_dropout": args.lora_dropout,
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "learning_rate": args.learning_rate,
+        "quantization": args.quantize,
+        "max_length": args.max_length,
+        "started_at": datetime.now().isoformat(),
+    }
+
+    with open(output_dir / "training_config.json", 'w') as f:
+        json.dump(training_config, f, indent=2)
 
     training_args = TrainingArguments(
         output_dir=str(output_dir),
@@ -232,175 +382,187 @@ def train_with_transformers(args):
 
     # Train
     print("\n" + "=" * 60)
-    print("Starting training...")
+    print("Starting Training")
     print("=" * 60)
-
-    trainer.train()
-
-    # Save
-    print(f"\nSaving model to: {output_dir}")
-    model.save_pretrained(output_dir)
-    tokenizer.save_pretrained(output_dir)
-
-    # Save training config
-    config = {
-        "base_model": args.base_model,
-        "training_data": args.training_data,
-        "lora_r": args.lora_r,
-        "lora_alpha": args.lora_alpha,
-        "epochs": args.epochs,
-        "batch_size": args.batch_size,
-        "learning_rate": args.learning_rate,
-        "quantization": args.quantize,
-        "timestamp": datetime.now().isoformat(),
-    }
-
-    with open(output_dir / "training_config.json", 'w') as f:
-        json.dump(config, f, indent=2)
-
-    print("\n" + "=" * 60)
-    print("Training complete!")
-    print("=" * 60)
-    print(f"\nOutput directory: {output_dir}")
-    print("\nTo use the fine-tuned model:")
-    print(f"  1. Copy adapter to Ollama (Mac):")
-    print(f"     python scripts/convert_lora_to_ollama.py --input {output_dir}")
-    print(f"  2. Or load directly in Python:")
-    print(f"     from peft import PeftModel")
-    print(f"     model = PeftModel.from_pretrained(base_model, '{output_dir}')")
-
-    return str(output_dir)
-
-
-def train_with_mlx(args):
-    """Train using MLX (for Mac Apple Silicon)."""
-    print("\n" + "=" * 60)
-    print("GSWA LoRA Fine-tuning with MLX (Apple Silicon)")
-    print("=" * 60)
+    print("\nThis may take a while depending on your hardware...")
+    print("Training progress will be shown below:")
+    print("-" * 40)
 
     try:
-        import mlx
-        import mlx.core as mx
-        from mlx_lm import load, generate
-    except ImportError:
-        print("\nMLX not installed. Install with:")
-        print("  pip install mlx mlx-lm")
-        sys.exit(1)
+        trainer.train()
 
-    print("\nMLX fine-tuning is best done with mlx-lm CLI:")
-    print(f"""
-    # Install mlx-lm
-    pip install mlx-lm
+        print("-" * 40)
+        print("\nTraining complete!")
 
-    # Prepare data in MLX format
-    python scripts/prepare_training_data.py --format completion --output ./data/training/
+        # Save model
+        print(f"\nSaving model to: {output_dir}")
+        model.save_pretrained(output_dir)
+        tokenizer.save_pretrained(output_dir)
 
-    # Run fine-tuning
-    mlx_lm.lora \\
-        --model {args.base_model} \\
-        --train \\
-        --data ./data/training/ \\
-        --batch-size 4 \\
-        --lora-layers 16 \\
-        --iters 1000
+        # Update metadata
+        update_model_metadata(output_dir, {
+            "status": "completed",
+            "completed_at": datetime.now().isoformat(),
+        })
 
-    # The adapter will be saved to ./adapters/
-    """)
+        # Update registry
+        registry = create_model_registry(args.output_dir)
 
-    return None
+        print("\n" + "=" * 60)
+        print("Training Summary")
+        print("=" * 60)
+        print(f"  Model saved to: {output_dir}")
+        print(f"  Total models in registry: {len(registry['models'])}")
+
+        print("\n" + "-" * 60)
+        print("Next Steps")
+        print("-" * 60)
+        print("\n  Option 1: Load directly in Python:")
+        print(f"    from peft import PeftModel")
+        print(f"    model = PeftModel.from_pretrained(base_model, '{output_dir}')")
+        print("\n  Option 2: Merge with base model:")
+        print(f"    python scripts/merge_lora.py --adapter {output_dir}")
+        print("\n  Option 3: Use with vLLM:")
+        print(f"    Configure LORA_ADAPTER_PATH={output_dir} in .env")
+
+        return str(output_dir)
+
+    except KeyboardInterrupt:
+        print("\n\nTraining interrupted by user.")
+        update_model_metadata(output_dir, {
+            "status": "interrupted",
+            "interrupted_at": datetime.now().isoformat(),
+        })
+        return None
+
+    except Exception as e:
+        print(f"\nERROR: Training failed: {e}")
+        update_model_metadata(output_dir, {
+            "status": "failed",
+            "error": str(e),
+            "failed_at": datetime.now().isoformat(),
+        })
+        return None
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LoRA fine-tuning for GSWA")
+    parser = argparse.ArgumentParser(
+        description="LoRA fine-tuning for GSWA (Linux/NVIDIA GPU)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Basic training with QLoRA (recommended)
+  python scripts/finetune_lora.py --quantize 4bit
+
+  # Full precision LoRA (needs more VRAM)
+  python scripts/finetune_lora.py --quantize none
+
+  # Use a different base model
+  python scripts/finetune_lora.py --base-model meta-llama/Llama-2-7b-chat-hf
+
+Note: For Mac users, use scripts/finetune_mlx_mac.py instead.
+        """
+    )
     parser.add_argument(
         "--base-model",
         default="mistralai/Mistral-7B-Instruct-v0.2",
-        help="Base model to fine-tune"
+        help="Base model to fine-tune (default: Mistral-7B-Instruct)"
     )
     parser.add_argument(
         "--training-data",
-        default="./data/training/alpaca.jsonl",
-        help="Training data file"
+        default="./data/training/alpaca_train.jsonl",
+        help="Training data file (default: ./data/training/alpaca_train.jsonl)"
     )
     parser.add_argument(
         "--output-dir",
         default="./models",
-        help="Output directory for fine-tuned model"
-    )
-    parser.add_argument(
-        "--backend",
-        choices=["transformers", "mlx"],
-        default="transformers",
-        help="Training backend"
+        help="Output directory for fine-tuned model (default: ./models)"
     )
     parser.add_argument(
         "--quantize",
         choices=["none", "4bit", "8bit"],
-        default="none",
-        help="Quantization level"
+        default="4bit",
+        help="Quantization level (default: 4bit for QLoRA)"
     )
     parser.add_argument(
         "--lora-r",
         type=int,
         default=16,
-        help="LoRA rank"
+        help="LoRA rank (default: 16)"
     )
     parser.add_argument(
         "--lora-alpha",
         type=int,
         default=32,
-        help="LoRA alpha"
+        help="LoRA alpha (default: 32)"
     )
     parser.add_argument(
         "--lora-dropout",
         type=float,
         default=0.05,
-        help="LoRA dropout"
+        help="LoRA dropout (default: 0.05)"
     )
     parser.add_argument(
         "--epochs",
         type=int,
         default=3,
-        help="Number of training epochs"
+        help="Number of training epochs (default: 3)"
     )
     parser.add_argument(
         "--batch-size",
         type=int,
         default=4,
-        help="Batch size"
+        help="Batch size (default: 4)"
     )
     parser.add_argument(
         "--gradient-accumulation-steps",
         type=int,
         default=4,
-        help="Gradient accumulation steps"
+        help="Gradient accumulation steps (default: 4)"
     )
     parser.add_argument(
         "--learning-rate",
         type=float,
         default=2e-4,
-        help="Learning rate"
+        help="Learning rate (default: 2e-4)"
     )
     parser.add_argument(
         "--max-length",
         type=int,
         default=2048,
-        help="Maximum sequence length"
+        help="Maximum sequence length (default: 2048)"
+    )
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Only check dependencies, don't train"
     )
 
     args = parser.parse_args()
 
-    # Check dependencies
-    check_dependencies()
+    print("\n" + "=" * 60)
+    print("GSWA LoRA Fine-tuning Script")
+    print("=" * 60)
 
-    # Create output directory
-    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    # Check dependencies
+    if not check_dependencies():
+        sys.exit(1)
+
+    if args.check_only:
+        print("\nDependency check passed!")
+        sys.exit(0)
+
+    # Check training data
+    if not check_training_data(args.training_data):
+        sys.exit(1)
 
     # Run training
-    if args.backend == "mlx":
-        train_with_mlx(args)
+    result = train_with_transformers(args)
+
+    if result:
+        sys.exit(0)
     else:
-        train_with_transformers(args)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

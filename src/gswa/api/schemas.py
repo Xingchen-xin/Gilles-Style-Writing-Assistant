@@ -54,6 +54,8 @@ class SimilarityScores(BaseModel):
     embed_top1: float = Field(..., description="Cosine similarity to most similar corpus paragraph")
     top1_doc_id: Optional[str] = None
     top1_para_id: Optional[str] = None
+    ai_score: Optional[float] = Field(None, description="AI trace detection score (0=human-like, 1=AI-like)")
+    ai_issues: Optional[int] = Field(None, description="Number of AI trace issues detected")
 
 
 class RewriteVariant(BaseModel):
@@ -107,6 +109,7 @@ class FeedbackType(str, Enum):
     GOOD = "good"          # Acceptable but not the best
     BAD = "bad"            # Not acceptable
     EDITED = "edited"      # User edited the output
+    AI_LIKE = "ai_like"    # Sounds too AI-generated (for DPO rejection)
 
 
 class VariantFeedback(BaseModel):
@@ -142,3 +145,4 @@ class FeedbackStats(BaseModel):
     good_count: int
     bad_count: int
     edited_count: int
+    ai_like_count: int = 0  # Count of AI-like flagged variants

@@ -1,6 +1,7 @@
 """Feedback Collection Service.
 
 Stores user feedback on generated variants for DPO training.
+Includes automatic AI trace detection for enhanced rejection sampling.
 """
 import json
 import uuid
@@ -13,6 +14,7 @@ from gswa.api.schemas import (
     FeedbackRequest, FeedbackResponse, FeedbackStats, FeedbackType
 )
 from gswa.config import get_settings
+from gswa.utils.ai_detector import get_ai_detector, AITraceResult
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,29 @@ class FeedbackService:
         # Store generated variants for pairing with feedback
         self._session_cache: dict[str, dict] = {}
 
+        # AI detector for automatic trace detection
+        self._ai_detector = get_ai_detector()
+
+    def analyze_ai_traces(self, text: str) -> dict:
+        """Analyze text for AI traces.
+
+        Args:
+            text: Text to analyze
+
+        Returns:
+            Dict with AI score and detection details
+        """
+        result = self._ai_detector.detect(text)
+        return {
+            "ai_score": result.score,
+            "has_ai_traces": result.has_ai_traces,
+            "issue_count": len(result.issues),
+            "top_issues": [
+                {"type": i["type"], "found": i.get("found", "")}
+                for i in result.issues[:3]
+            ],
+        }
+
     def store_session(
         self,
         session_id: str,
@@ -43,6 +68,8 @@ class FeedbackService:
     ) -> None:
         """Store a rewrite session for later feedback.
 
+        Automatically analyzes variants for AI traces and stores scores.
+
         Args:
             session_id: Unique session identifier
             input_text: Original input text
@@ -50,9 +77,19 @@ class FeedbackService:
             section: Paper section type
             model_version: Model version used
         """
+        # Analyze each variant for AI traces
+        variants_with_ai_scores = []
+        for v in variants:
+            variant_copy = dict(v)
+            text = v.get("text", "")
+            if text:
+                ai_analysis = self.analyze_ai_traces(text)
+                variant_copy["ai_analysis"] = ai_analysis
+            variants_with_ai_scores.append(variant_copy)
+
         self._session_cache[session_id] = {
             "input_text": input_text,
-            "variants": variants,
+            "variants": variants_with_ai_scores,
             "section": section,
             "model_version": model_version,
             "timestamp": datetime.utcnow().isoformat()
@@ -98,6 +135,8 @@ class FeedbackService:
                 variant_data["original_text"] = original.get("text", "")
                 variant_data["strategy"] = original.get("strategy", "")
                 variant_data["scores"] = original.get("scores", {})
+                # Include AI trace analysis
+                variant_data["ai_analysis"] = original.get("ai_analysis", {})
 
             record["variants"].append(variant_data)
 
@@ -130,7 +169,8 @@ class FeedbackService:
             FeedbackType.BEST: 0,
             FeedbackType.GOOD: 0,
             FeedbackType.BAD: 0,
-            FeedbackType.EDITED: 0
+            FeedbackType.EDITED: 0,
+            FeedbackType.AI_LIKE: 0,
         }
 
         for feedback_file in self.feedback_dir.glob("feedback_*.jsonl"):
@@ -155,7 +195,8 @@ class FeedbackService:
             best_count=counts[FeedbackType.BEST],
             good_count=counts[FeedbackType.GOOD],
             bad_count=counts[FeedbackType.BAD],
-            edited_count=counts[FeedbackType.EDITED]
+            edited_count=counts[FeedbackType.EDITED],
+            ai_like_count=counts[FeedbackType.AI_LIKE],
         )
 
     def export_for_dpo(self, output_path: str) -> int:
@@ -196,6 +237,8 @@ class FeedbackService:
     def _extract_dpo_pairs(self, record: dict) -> list[dict]:
         """Extract DPO training pairs from a feedback record.
 
+        Uses both explicit feedback and automatic AI trace detection.
+
         Args:
             record: Feedback record
 
@@ -206,15 +249,54 @@ class FeedbackService:
         input_text = record.get("input_text", "")
         variants = record.get("variants", [])
 
-        # Find best and worst variants
+        # Find best and worst variants based on explicit feedback
         best_variants = [v for v in variants if v.get("feedback_type") == "best"]
         good_variants = [v for v in variants if v.get("feedback_type") == "good"]
         bad_variants = [v for v in variants if v.get("feedback_type") == "bad"]
         edited_variants = [v for v in variants if v.get("feedback_type") == "edited"]
+        ai_like_variants = [v for v in variants if v.get("feedback_type") == "ai_like"]
 
-        # Preferred outputs (in order of preference)
-        preferred = edited_variants + best_variants + good_variants
-        rejected = bad_variants
+        # Also use automatic AI detection for rejection candidates
+        # Variants with high AI scores (>0.5) that weren't marked as best/good
+        auto_rejected = []
+        for v in variants:
+            ai_analysis = v.get("ai_analysis", {})
+            ai_score = ai_analysis.get("ai_score", 0)
+            feedback_type = v.get("feedback_type", "")
+
+            # High AI score + not marked as good = potential rejection
+            if ai_score > 0.5 and feedback_type not in ["best", "good", "edited"]:
+                auto_rejected.append(v)
+
+        # Preferred outputs (in order of preference):
+        # 1. Edited by user (highest value)
+        # 2. Best (user's choice)
+        # 3. Good with low AI score
+        preferred = []
+        preferred.extend(edited_variants)
+        preferred.extend(best_variants)
+
+        # Only add good variants with low AI scores
+        for v in good_variants:
+            ai_score = v.get("ai_analysis", {}).get("ai_score", 0)
+            if ai_score < 0.4:
+                preferred.append(v)
+
+        # Rejected outputs:
+        # 1. Explicitly marked as bad
+        # 2. Explicitly marked as ai_like
+        # 3. Auto-detected high AI score variants
+        rejected = bad_variants + ai_like_variants + auto_rejected
+
+        # Remove duplicates (by text)
+        seen_rejected = set()
+        unique_rejected = []
+        for v in rejected:
+            text = v.get("original_text", "")
+            if text and text not in seen_rejected:
+                seen_rejected.add(text)
+                unique_rejected.append(v)
+        rejected = unique_rejected
 
         # Create pairs: each preferred paired with each rejected
         for pref in preferred:
@@ -224,8 +306,12 @@ class FeedbackService:
 
             for rej in rejected:
                 rej_text = rej.get("original_text", "")
-                if not rej_text:
+                if not rej_text or rej_text == pref_text:
                     continue
+
+                # Get AI scores for metadata
+                pref_ai_score = pref.get("ai_analysis", {}).get("ai_score", 0)
+                rej_ai_score = rej.get("ai_analysis", {}).get("ai_score", 0)
 
                 pairs.append({
                     "prompt": input_text,
@@ -234,9 +320,40 @@ class FeedbackService:
                     "section": record.get("section"),
                     "chosen_strategy": pref.get("strategy"),
                     "rejected_strategy": rej.get("strategy"),
+                    "chosen_ai_score": pref_ai_score,
+                    "rejected_ai_score": rej_ai_score,
+                    "rejection_reason": self._get_rejection_reason(rej),
                 })
 
         return pairs
+
+    def _get_rejection_reason(self, variant: dict) -> str:
+        """Get human-readable rejection reason for a variant.
+
+        Args:
+            variant: Variant dict
+
+        Returns:
+            Rejection reason string
+        """
+        reasons = []
+
+        feedback_type = variant.get("feedback_type", "")
+        if feedback_type == "bad":
+            reasons.append("user_marked_bad")
+        elif feedback_type == "ai_like":
+            reasons.append("user_marked_ai_like")
+
+        ai_analysis = variant.get("ai_analysis", {})
+        if ai_analysis.get("ai_score", 0) > 0.5:
+            reasons.append(f"high_ai_score({ai_analysis['ai_score']:.2f})")
+
+        top_issues = ai_analysis.get("top_issues", [])
+        if top_issues:
+            issue_types = [i.get("type", "") for i in top_issues[:2]]
+            reasons.append(f"issues:{','.join(issue_types)}")
+
+        return "; ".join(reasons) if reasons else "unspecified"
 
 
 # Singleton instance

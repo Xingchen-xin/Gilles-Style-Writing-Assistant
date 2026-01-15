@@ -1,4 +1,4 @@
-.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup-mac setup-ollama prepare-training finetune-lora finetune-mlx finetune-all finetune-smart list-docs training-stats check-deps check-mlx check-lora corpus corpus-add corpus-guide corpus-validate train train-auto train-model status models
+.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup-mac setup-ollama prepare-training finetune-lora finetune-mlx finetune-all finetune-smart list-docs training-stats check-deps check-mlx check-lora corpus corpus-add corpus-guide corpus-validate train train-auto train-model status models analyze-style style-show ai-check
 
 # Default target
 help:
@@ -52,6 +52,11 @@ help:
 	@echo "  training-stats    - Show training data statistics"
 	@echo "  check-mlx         - Check MLX dependencies (Mac)"
 	@echo "  check-lora        - Check LoRA dependencies (Linux)"
+	@echo ""
+	@echo "  === Style Analysis & AI Detection ==="
+	@echo "  analyze-style     - Analyze author style from corpus"
+	@echo "  style-show        - Show current style fingerprint"
+	@echo "  ai-check          - Check text for AI traces (interactive)"
 	@echo ""
 	@echo "  === Utilities ==="
 	@echo "  clean          - Clean build artifacts"
@@ -253,3 +258,27 @@ clean:
 	find . -type f -name "*.pyc" -delete 2>/dev/null || true
 	find . -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true
 	find . -type d -name ".ruff_cache" -exec rm -rf {} + 2>/dev/null || true
+
+# ==================
+# Style Analysis & AI Detection
+# ==================
+
+# Analyze author writing style from corpus
+analyze-style:
+	python scripts/analyze_style.py
+
+# Show current style fingerprint
+style-show:
+	@if [ -f data/style/author_fingerprint.json ]; then \
+		python scripts/analyze_style.py --verbose; \
+	else \
+		echo "No style fingerprint found. Run: make analyze-style"; \
+	fi
+
+# Check text for AI traces (interactive)
+ai-check:
+	@echo "AI Trace Checker"
+	@echo "================"
+	@echo "Paste your text and press Ctrl+D when done:"
+	@echo ""
+	@python3 -c "import sys; sys.path.insert(0,'src'); from gswa.utils.ai_detector import detect_ai_traces, get_ai_detector; text=sys.stdin.read(); result=detect_ai_traces(text); print(f'\n=== Results ===\nAI Score: {result.score:.2f} (0=human, 1=AI)\nHas AI Traces: {result.has_ai_traces}\nIssues Found: {len(result.issues)}\n'); [print(f'  - {i[\"type\"]}: {i.get(\"found\",\"\")} -> {i.get(\"suggestion\",\"\")}') for i in result.issues[:5]]; print(f'\n=== Tips ==='); [print(f'  {t}') for t in get_ai_detector().get_humanization_tips(result)[:5]]"

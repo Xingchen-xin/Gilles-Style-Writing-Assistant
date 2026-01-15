@@ -1,6 +1,9 @@
 """Rewriter Orchestrator.
 
-Main orchestration logic for rewriting with similarity checks and fallback.
+Main orchestration logic for rewriting with:
+- Similarity checks and fallback
+- AI trace detection and correction
+- Author style fingerprint integration
 """
 import time
 import logging
@@ -12,7 +15,9 @@ from gswa.api.schemas import (
 )
 from gswa.services.llm_client import get_llm_client
 from gswa.services.similarity import SimilarityService
-from gswa.services.prompt import PromptService
+from gswa.services.prompt import PromptService, get_prompt_service
+from gswa.services.feedback import get_feedback_service
+from gswa.utils.ai_detector import get_ai_detector, correct_ai_traces
 from gswa.config import get_settings
 
 
@@ -33,7 +38,13 @@ class RewriterService:
         self.settings = get_settings()
         self.llm_client = get_llm_client()
         self.similarity_service = SimilarityService()
-        self.prompt_service = PromptService()
+        self.prompt_service = get_prompt_service()
+        self.ai_detector = get_ai_detector()
+        self.feedback_service = get_feedback_service()
+
+        # AI detection thresholds
+        self.ai_score_threshold = 0.5  # Above this triggers correction
+        self.enable_ai_correction = True  # Auto-correct AI traces
 
     async def initialize(self) -> None:
         """Initialize services (load corpus, etc.)."""
@@ -53,11 +64,12 @@ class RewriterService:
         """Rewrite text with multiple variants.
 
         Process:
-        1. Build prompts for each strategy
+        1. Build prompts for each strategy (with anti-AI rules)
         2. Generate variants
         3. Check similarity for each
         4. Trigger fallback if needed
-        5. Return results with scores
+        5. Check for AI traces and auto-correct
+        6. Return results with scores
 
         Args:
             request: Rewrite request with text and options
@@ -78,10 +90,12 @@ class RewriterService:
         for i, strategy in enumerate(strategies):
             logger.info(f"Generating variant {i+1}/{len(strategies)} with strategy {strategy.value}")
 
-            # Build prompts
+            # Build prompts (now includes anti-AI rules and style fingerprint)
             system_prompt = self.prompt_service.build_system_prompt(
                 section=request.section,
                 is_fallback=False,
+                include_anti_ai=True,
+                include_style=True,
             )
             user_prompt = self.prompt_service.build_user_prompt(
                 text=request.text,
@@ -118,6 +132,8 @@ class RewriterService:
                 system_prompt = self.prompt_service.build_system_prompt(
                     section=request.section,
                     is_fallback=True,
+                    include_anti_ai=True,
+                    include_style=True,
                 )
 
                 messages = [
@@ -133,6 +149,24 @@ class RewriterService:
                 # Re-check similarity
                 _, scores = self.similarity_service.check_similarity(generated_text)
 
+            # Check for AI traces and auto-correct if enabled
+            ai_result = self.ai_detector.detect(generated_text)
+            ai_score = ai_result.score
+
+            if self.enable_ai_correction and ai_score > self.ai_score_threshold:
+                logger.info(f"AI traces detected (score: {ai_score:.2f}), applying corrections")
+                generated_text = correct_ai_traces(generated_text)
+                # Re-check after correction
+                ai_result = self.ai_detector.detect(generated_text)
+                if fallback_reason:
+                    fallback_reason += f"; ai_corrected (orig: {ai_score:.2f})"
+                else:
+                    fallback_reason = f"ai_corrected (orig: {ai_score:.2f})"
+
+            # Add AI score to similarity scores
+            scores["ai_score"] = ai_result.score
+            scores["ai_issues"] = len(ai_result.issues)
+
             variants.append(RewriteVariant(
                 text=generated_text.strip(),
                 strategy=strategy,
@@ -143,11 +177,22 @@ class RewriterService:
                     top1_doc_id=scores.get("top1_doc_id"),
                     top1_para_id=scores.get("top1_para_id"),
                 ),
-                fallback=fallback,
+                fallback=fallback or (ai_score > self.ai_score_threshold),
                 fallback_reason=fallback_reason,
             ))
 
         processing_time = int((time.time() - start_time) * 1000)
+
+        # Store session for feedback collection
+        import uuid
+        session_id = str(uuid.uuid4())[:8]
+        self.feedback_service.store_session(
+            session_id=session_id,
+            input_text=request.text,
+            variants=[v.model_dump() for v in variants],
+            section=request.section.value if request.section else None,
+            model_version=f"{self.settings.vllm_model_name}@v1",
+        )
 
         return RewriteResponse(
             variants=variants,

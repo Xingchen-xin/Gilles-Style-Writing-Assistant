@@ -46,6 +46,8 @@ CORPUS_PARSED_DIR = PROJECT_ROOT / "data" / "corpus" / "parsed"
 TRAINING_DATA_DIR = PROJECT_ROOT / "data" / "training"
 MODELS_DIR = PROJECT_ROOT / "models"
 INDEX_DIR = PROJECT_ROOT / "data" / "index"
+STYLE_DIR = PROJECT_ROOT / "data" / "style"
+STYLE_FINGERPRINT = STYLE_DIR / "author_fingerprint.json"
 
 
 # Model configurations
@@ -515,6 +517,53 @@ def run_build_index() -> bool:
     return result.returncode == 0
 
 
+def run_analyze_style() -> bool:
+    """Analyze author style and create fingerprint."""
+    print_info("Analyzing author writing style...")
+
+    cmd = [
+        sys.executable,
+        str(PROJECT_ROOT / "scripts" / "analyze_style.py"),
+        "--quiet"
+    ]
+    result = subprocess.run(cmd, cwd=str(PROJECT_ROOT))
+
+    return result.returncode == 0
+
+
+def show_style_status():
+    """Show style fingerprint status."""
+    print_section("Style Fingerprint Status")
+
+    if STYLE_FINGERPRINT.exists():
+        try:
+            with open(STYLE_FINGERPRINT, "r", encoding="utf-8") as f:
+                fp = json.load(f)
+
+            print(f"  Author:          {fp.get('author_name', 'Unknown')}")
+            print(f"  Corpus size:     {fp.get('corpus_size', 0)} paragraphs")
+            print(f"  Total words:     {fp.get('total_words', 0):,}")
+
+            ss = fp.get("sentence_stats", {})
+            if ss.get("avg_length"):
+                print(f"  Avg sentence:    {ss['avg_length']:.1f} words")
+
+            st = fp.get("structure_stats", {})
+            if st.get("passive_voice_ratio"):
+                print(f"  Passive voice:   {st['passive_voice_ratio']*100:.1f}%")
+
+            vs = fp.get("vocabulary_stats", {})
+            if vs.get("favorite_transitions"):
+                print(f"  Transitions:     {', '.join(vs['favorite_transitions'][:5])}")
+
+            print(f"\n  {Colors.colorize('Style fingerprint loaded', Colors.GREEN)}")
+        except Exception as e:
+            print_warning(f"Could not read fingerprint: {e}")
+    else:
+        print(f"  Status:          {Colors.colorize('Not analyzed', Colors.YELLOW)}")
+        print_info("Style analysis will run during training")
+
+
 def run_training(system_info: SystemInfo, model_key: str) -> bool:
     """Run training."""
     model = MODELS[model_key]
@@ -603,6 +652,9 @@ Examples:
     training = detect_training_data()
     show_training_status(training)
 
+    # Step 3.5: Style fingerprint status
+    show_style_status()
+
     # Status only mode
     if args.status:
         print()
@@ -651,6 +703,7 @@ Examples:
 
     steps = StepProgress([
         "Parse corpus",
+        "Analyze author style",
         "Prepare training data",
         "Build similarity index",
         "Fine-tune model",
@@ -668,37 +721,45 @@ Examples:
     else:
         steps.complete(0, "Skipped")
 
-    # 5.2 Prepare training data
+    # 5.2 Analyze author style
     steps.start(1)
-    if run_prepare_training():
+    if run_analyze_style():
         steps.complete(1)
     else:
-        steps.fail(1, "Training data preparation failed")
+        steps.fail(1, "Style analysis failed")
         return 1
 
-    # 5.3 Build index
+    # 5.3 Prepare training data
+    steps.start(2)
+    if run_prepare_training():
+        steps.complete(2)
+    else:
+        steps.fail(2, "Training data preparation failed")
+        return 1
+
+    # 5.4 Build index
     if not args.skip_index:
-        steps.start(2)
+        steps.start(3)
         if run_build_index():
-            steps.complete(2)
+            steps.complete(3)
         else:
-            steps.fail(2, "Index building failed")
+            steps.fail(3, "Index building failed")
             return 1
     else:
-        steps.complete(2, "Skipped")
+        steps.complete(3, "Skipped")
 
-    # 5.4 Execute training
-    steps.start(3)
+    # 5.5 Execute training
+    steps.start(4)
     if run_training(system_info, selected_model):
-        steps.complete(3)
+        steps.complete(4)
     else:
-        steps.fail(3, "Training failed")
+        steps.fail(4, "Training failed")
         return 1
 
-    # 5.5 Verify
-    steps.start(4)
+    # 5.6 Verify
+    steps.start(5)
     # Basic verification
-    steps.complete(4, "Model saved")
+    steps.complete(5, "Model saved")
 
     # Complete
     print()

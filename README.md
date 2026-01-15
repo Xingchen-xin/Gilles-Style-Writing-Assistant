@@ -28,6 +28,8 @@ GSWA 是一个本地部署的 AI 写作助手，专门用于将科学论文段�
 - **语义保持** - 不改变数值、实验条件、结论强度
 - **去重保护** - N-gram + 向量相似度检测，自动回退重写
 - **多平台支持** - Mac (Ollama)、Linux (vLLM)、Windows (LM Studio)
+- **AI 检测规避** - 自动检测和修正 AI 写作痕迹，降低被 AI 检测器识别的风险
+- **风格指纹分析** - 自动提取目标作者的写作特征，生成更像人类的输出
 
 ### 支持的 LLM 后端
 
@@ -458,6 +460,126 @@ make training-stats    # 查看训练数据统计
 ```
 
 详细文档：[docs/FINETUNING.md](docs/FINETUNING.md)
+
+---
+
+## AI 检测规避 (Anti-AI Detection)
+
+GSWA 内置了多层 AI 检测规避机制，帮助生成更像人类写作的输出。
+
+### 工作原理
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    AI 检测规避流程                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌─────────┐  │
+│   │ 1. 生成   │───▶│ 2. 检测   │───▶│ 3. 修正   │───▶│ 4. 输出 │  │
+│   │ (带规则)  │    │ AI 痕迹   │    │ (自动)    │    │ (安全)  │  │
+│   └──────────┘    └──────────┘    └──────────┘    └─────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 检测的 AI 痕迹类型
+
+| 类型 | 典型例子 | 修正方式 |
+|------|----------|----------|
+| **过度使用的过渡词** | Furthermore, Moreover, Additionally | 替换为 Also, And, 或删除 |
+| **AI 惯用短语** | It is worth noting that... | 直接陈述内容 |
+| **过度正式词汇** | utilize, leverage, facilitate | 使用简单词: use, help |
+| **句子长度均匀** | 所有句子 15-25 词 | 混合短句和长句 |
+| **完美枚举结构** | First... Second... Third... | 变化表达方式 |
+| **过度 hedge** | may potentially possibly | 限制每段最多 2 个 |
+
+### 使用命令
+
+```bash
+# 分析文本的 AI 痕迹
+make ai-check
+
+# 分析作者风格
+make analyze-style
+
+# 查看当前风格指纹
+make style-show
+```
+
+### AI 分数解读
+
+| 分数范围 | 含义 | 建议 |
+|----------|------|------|
+| 0.0 - 0.2 | 很像人类写作 | 无需修改 |
+| 0.2 - 0.4 | 正常范围 | 可接受 |
+| 0.4 - 0.6 | 有明显 AI 特征 | 建议修正 |
+| 0.6 - 1.0 | 强烈 AI 特征 | 必须修正 |
+
+### 最佳实践
+
+1. **选择合适的基础模型**
+   - 推荐: Qwen 2.5-7B (英文学术写作能力强)
+   - 避免: GPT-4/Claude API (输出有明显指纹)
+
+2. **收集足够的训练语料**
+   - 至少 10+ 篇目标作者的论文
+   - 将代表性文章放入 `important_examples/` (2.5x 权重)
+
+3. **利用 DPO 训练**
+   - 将"听起来像 AI"的输出标记为 `ai_like`
+   - 系统会自动检测高 AI 分数的输出并加入拒绝集
+
+4. **后处理检查**
+   ```bash
+   make ai-check  # 粘贴文本检查
+   ```
+
+---
+
+## 风格指纹分析
+
+系统会自动分析目标作者的写作特征，生成风格指纹。
+
+### 分析的特征
+
+- **句子统计**: 平均长度、分布、变化程度
+- **词汇偏好**: 常用动词、形容词、过渡词
+- **结构特征**: 被动语态比例、hedge 使用频率
+- **短语模式**: 常见开头、过渡方式
+
+### 使用方式
+
+```bash
+# 一键训练时自动分析
+make train
+
+# 单独运行分析
+make analyze-style
+
+# 查看详细指纹
+make style-show
+```
+
+### 输出示例
+
+```
+=== Style Fingerprint ===
+Author:          Gilles
+Corpus size:     156 paragraphs
+Total words:     45,230
+
+Sentence Statistics:
+  Average length:  22.5 words (std: 8.3)
+  Distribution:    15% short, 60% medium, 25% long
+
+Structure:
+  Passive voice:   35.2% of sentences
+  Hedge frequency: 1.8 per 100 words
+
+Vocabulary:
+  Top verbs:       show, demonstrate, indicate, suggest
+  Transitions:     however, also, while, although
+```
 
 ---
 

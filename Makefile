@@ -1,4 +1,4 @@
-.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup-mac setup-ollama prepare-training finetune-lora finetune-mlx finetune-all finetune-smart list-docs training-stats check-deps check-mlx check-lora corpus corpus-add corpus-guide corpus-validate train train-auto train-model status models analyze-style style-show ai-check
+.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup-mac setup-ollama prepare-training finetune-lora finetune-mlx finetune-all finetune-smart list-docs training-stats check-deps check-mlx check-lora corpus corpus-add corpus-guide corpus-validate train train-auto train-model status models analyze-style style-show ai-check humanize
 
 # Default target
 help:
@@ -56,7 +56,8 @@ help:
 	@echo "  === Style Analysis & AI Detection ==="
 	@echo "  analyze-style     - Analyze author style from corpus"
 	@echo "  style-show        - Show current style fingerprint"
-	@echo "  ai-check          - Check text for AI traces (interactive)"
+	@echo "  ai-check          - Check text for AI traces (scientific analysis)"
+	@echo "  humanize          - Auto-humanize text to reduce AI score"
 	@echo ""
 	@echo "  === Utilities ==="
 	@echo "  clean          - Clean build artifacts"
@@ -275,10 +276,49 @@ style-show:
 		echo "No style fingerprint found. Run: make analyze-style"; \
 	fi
 
-# Check text for AI traces (interactive)
+# Check text for AI traces (interactive) - Scientific analysis
 ai-check:
-	@echo "AI Trace Checker"
-	@echo "================"
-	@echo "Paste your text and press Ctrl+D when done:"
+	@echo "=== Scientific AI Detection ==="
+	@echo "Based on: Perplexity, Burstiness, Vocabulary Diversity, Style Consistency"
 	@echo ""
-	@python3 -c "import sys; sys.path.insert(0,'src'); from gswa.utils.ai_detector import detect_ai_traces, get_ai_detector; text=sys.stdin.read(); result=detect_ai_traces(text); print(f'\n=== Results ===\nAI Score: {result.score:.2f} (0=human, 1=AI)\nHas AI Traces: {result.has_ai_traces}\nIssues Found: {len(result.issues)}\n'); [print(f'  - {i[\"type\"]}: {i.get(\"found\",\"\")} -> {i.get(\"suggestion\",\"\")}') for i in result.issues[:5]]; print(f'\n=== Tips ==='); [print(f'  {t}') for t in get_ai_detector().get_humanization_tips(result)[:5]]"
+	@echo "Paste your text and press Ctrl+D (or Ctrl+Z on Windows) when done:"
+	@echo ""
+	@python3 -c "\
+import sys; sys.path.insert(0,'src'); \
+from gswa.utils.ai_detector import analyze_text_detailed; \
+text=sys.stdin.read().strip(); \
+r=analyze_text_detailed(text); \
+print(f\"\n{'='*50}\"); \
+print(f\"OVERALL: AI Score = {r['overall']['ai_score']:.2f} | Risk: {r['overall']['risk_level'].upper()}\"); \
+print(f\"Confidence: {r['overall']['confidence']:.0%}\"); \
+print(f\"{'='*50}\"); \
+print(f\"\nMETRICS (lower score = more human-like):\"); \
+m=r['metrics']; \
+print(f\"  Perplexity:     {m['perplexity']['value']:>6.1f}  (score: {m['perplexity']['score']:.2f})\"); \
+print(f\"  Burstiness:     {m['burstiness']['value']:>6.3f}  (score: {m['burstiness']['score']:.2f})\"); \
+print(f\"  Vocab Diversity:{m['vocabulary_diversity']['value']:>6.3f}  (score: {m['vocabulary_diversity']['score']:.2f})\"); \
+print(f\"  Style Match:    {m['style_consistency']['value']:>6.3f}  (score: {m['style_consistency']['score']:.2f})\"); \
+print(f\"\nSentence lengths: {r['sentence_lengths']}\"); \
+print(f\"\nSUGGESTIONS:\"); \
+[print(f'  - {s}') for s in r['suggestions'][:5]]"
+
+# Humanize text (interactive) - Reduce AI detection score
+humanize:
+	@echo "=== Text Humanizer ==="
+	@echo "Automatically reduces AI detection score"
+	@echo ""
+	@echo "Paste your text and press Ctrl+D (or Ctrl+Z on Windows) when done:"
+	@echo ""
+	@python3 -c "\
+import sys; sys.path.insert(0,'src'); \
+from gswa.utils.ai_detector import humanize_text, detect_ai_traces; \
+text=sys.stdin.read().strip(); \
+before=detect_ai_traces(text); \
+result=humanize_text(text); \
+after=detect_ai_traces(result); \
+print(f\"\n{'='*50}\"); \
+print(f\"AI Score: {before.ai_score:.2f} -> {after.ai_score:.2f} ({(before.ai_score-after.ai_score)*100:+.0f}%)\"); \
+print(f\"Burstiness: {before.burstiness:.3f} -> {after.burstiness:.3f}\"); \
+print(f\"{'='*50}\"); \
+print(f\"\nHUMANIZED TEXT:\n\"); \
+print(result)"

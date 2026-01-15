@@ -21,38 +21,46 @@ STYLE_FINGERPRINT_PATH = Path("data/style/author_fingerprint.json")
 # ==============================================================================
 
 ANTI_AI_RULES = """
-CRITICAL ANTI-AI DETECTION RULES (MUST follow to avoid AI detection):
+CRITICAL: WRITE LIKE A HUMAN (Based on AI detection research)
 
-1. SENTENCE VARIATION:
-   - Mix sentence lengths dramatically: include some SHORT sentences (5-10 words) and some LONG ones (30-40 words)
-   - Do NOT write all sentences with similar length (15-25 words) - this is a major AI signature
-   - Occasionally use a sentence fragment for emphasis
+AI detectors analyze: (1) sentence variation, (2) vocabulary predictability, (3) style consistency.
+To avoid detection, follow these research-backed strategies:
 
-2. FORBIDDEN WORDS/PHRASES (these trigger AI detectors):
-   - NEVER use: "Furthermore", "Moreover", "Additionally", "Consequently", "Nevertheless"
-   - NEVER use: "It is worth noting that", "It is important to note", "It should be noted"
-   - NEVER use: "utilize" (use "use"), "leverage", "facilitate", "elucidate"
-   - NEVER use: "a wide range of", "plays a crucial/vital/pivotal role"
-   - NEVER start with: "In conclusion,", "To summarize,", "In summary,"
+== MOST IMPORTANT: SENTENCE BURSTINESS (30% of detection weight) ==
+Human writing has HIGH variation in sentence length. AI writing is UNIFORM.
 
-3. STRUCTURE VARIATION:
-   - Do NOT use "First... Second... Third..." enumeration
-   - Do NOT use perfect parallel structures repeatedly
-   - Occasionally start a sentence with "And" or "But" (acceptable in academic writing)
-   - Vary paragraph openings - don't always start with the main claim
+REQUIRED pattern:
+- Include at least ONE short sentence (5-10 words) per paragraph
+- Include at least ONE longer sentence (25-35 words) per paragraph
+- Coefficient of variation should be > 0.4 (standard deviation / mean)
 
-4. HEDGE WORDS:
-   - Limit to MAX 2 hedge words (may/might/could/potentially) per paragraph
-   - Don't stack hedges: "may potentially" or "could possibly" sound AI-generated
+Example (GOOD - varied):
+"The results were striking. We observed a 47% increase in binding affinity when the modified peptide was introduced, suggesting that the conformational change plays a key role in receptor recognition. This matters."
 
-5. HUMAN TOUCHES:
-   - Use simpler words when possible: "show" not "demonstrate", "use" not "utilize"
-   - Include occasional contractions in appropriate contexts
-   - Don't over-explain - trust the reader
+Example (BAD - uniform):
+"The results showed a significant increase in binding affinity. The modified peptide demonstrated enhanced receptor recognition. The conformational change appeared to be important."
 
-6. PREFERRED TRANSITIONS:
-   - Use: "However", "Also", "Yet", "Still", "So", "But", "And"
-   - For emphasis: just state the point directly without announcing it"""
+== VOCABULARY UNPREDICTABILITY (25% weight) ==
+- Avoid the most statistically likely next word
+- Use unexpected but accurate synonyms occasionally
+- Don't always use the "perfect" academic word
+
+== STYLE CONSISTENCY WITH AUTHOR (15% weight) ==
+- Match the sentence length distribution of the author's corpus
+- Use the author's preferred verbs and transitions
+- Match passive/active voice ratio
+
+== LOWER PRIORITY: Word Substitutions (10% weight) ==
+Prefer simpler words:
+- "use" not "utilize"
+- "show" not "demonstrate"
+- "help" not "facilitate"
+- "Also" not "Furthermore/Moreover"
+
+Remove filler phrases entirely:
+- Delete "It is worth noting that"
+- Delete "It is important to note"
+- Just state the point directly"""
 
 
 # System prompt (style card)

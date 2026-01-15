@@ -151,7 +151,7 @@ class RewriterService:
 
             # Check for AI traces and auto-correct if enabled
             ai_result = self.ai_detector.detect(generated_text)
-            ai_score = ai_result.score
+            ai_score = ai_result.ai_score
 
             if self.enable_ai_correction and ai_score > self.ai_score_threshold:
                 logger.info(f"AI traces detected (score: {ai_score:.2f}), applying corrections")
@@ -164,8 +164,8 @@ class RewriterService:
                     fallback_reason = f"ai_corrected (orig: {ai_score:.2f})"
 
             # Add AI score to similarity scores
-            scores["ai_score"] = ai_result.score
-            scores["ai_issues"] = len(ai_result.issues)
+            scores["ai_score"] = ai_result.ai_score
+            scores["ai_issues"] = len(ai_result.pattern_issues)
 
             variants.append(RewriteVariant(
                 text=generated_text.strip(),

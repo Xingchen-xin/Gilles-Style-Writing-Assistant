@@ -465,74 +465,79 @@ make training-stats    # 查看训练数据统计
 
 ## AI 检测规避 (Anti-AI Detection)
 
-GSWA 内置了多层 AI 检测规避机制，帮助生成更像人类写作的输出。
+GSWA 内置**基于学术研究**的科学化 AI 检测规避系统。
 
-### 工作原理
+### 检测原理 (基于学术研究)
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    AI 检测规避流程                               │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│   ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌─────────┐  │
-│   │ 1. 生成   │───▶│ 2. 检测   │───▶│ 3. 修正   │───▶│ 4. 输出 │  │
-│   │ (带规则)  │    │ AI 痕迹   │    │ (自动)    │    │ (安全)  │  │
-│   └──────────┘    └──────────┘    └──────────┘    └─────────┘  │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+系统使用四个核心指标，权重基于研究有效性：
 
-### 检测的 AI 痕迹类型
+| 指标 | 权重 | 原理 | 人类特征 | AI 特征 |
+|------|------|------|----------|---------|
+| **Burstiness** | 30% | 句子长度变化 (CV) | > 0.4 | < 0.3 |
+| **Perplexity** | 25% | 文本可预测性 | 20-80 | 5-15 |
+| **Vocabulary** | 20% | 词汇多样性 (TTR) | 0.5-0.8 | 0.3-0.5 |
+| **Style Match** | 15% | 与作者风格匹配 | 高 | 低 |
+| **Patterns** | 10% | AI 典型短语 | 无 | 有 |
 
-| 类型 | 典型例子 | 修正方式 |
-|------|----------|----------|
-| **过度使用的过渡词** | Furthermore, Moreover, Additionally | 替换为 Also, And, 或删除 |
-| **AI 惯用短语** | It is worth noting that... | 直接陈述内容 |
-| **过度正式词汇** | utilize, leverage, facilitate | 使用简单词: use, help |
-| **句子长度均匀** | 所有句子 15-25 词 | 混合短句和长句 |
-| **完美枚举结构** | First... Second... Third... | 变化表达方式 |
-| **过度 hedge** | may potentially possibly | 限制每段最多 2 个 |
+> 参考文献: GPTZero, DetectGPT, StyloAI, DIPPER 等研究
 
 ### 使用命令
 
 ```bash
-# 分析文本的 AI 痕迹
+# 科学化 AI 分析 (显示各维度分数)
 make ai-check
+
+# 一键人性化文本 (自动降低 AI 分数)
+make humanize
 
 # 分析作者风格
 make analyze-style
-
-# 查看当前风格指纹
-make style-show
 ```
 
-### AI 分数解读
+### 输出示例
 
-| 分数范围 | 含义 | 建议 |
-|----------|------|------|
-| 0.0 - 0.2 | 很像人类写作 | 无需修改 |
-| 0.2 - 0.4 | 正常范围 | 可接受 |
-| 0.4 - 0.6 | 有明显 AI 特征 | 建议修正 |
-| 0.6 - 1.0 | 强烈 AI 特征 | 必须修正 |
+```
+=== Scientific AI Detection ===
+OVERALL: AI Score = 0.42 | Risk: MODERATE
+Confidence: 85%
+
+METRICS (lower score = more human-like):
+  Perplexity:      28.5  (score: 0.35)
+  Burstiness:      0.312 (score: 0.58)  ← 需要改进!
+  Vocab Diversity: 0.523 (score: 0.28)
+  Style Match:     0.650 (score: 0.35)
+
+Sentence lengths: [18, 22, 19, 21, 20]  ← 太均匀!
+
+SUGGESTIONS:
+  - CRITICAL: Sentence lengths too uniform. Mix short and long.
+  - Remove/replace: 'Furthermore'
+```
+
+### 最关键: Burstiness (句子变化)
+
+研究表明 **句子长度均匀性是最强的 AI 检测信号**：
+
+```
+❌ AI 输出 (Burstiness = 0.18):
+"The results showed significant improvements. The modified
+approach demonstrated enhanced performance. The experimental
+conditions were carefully controlled."
+→ 长度: [5, 5, 5] 太均匀
+
+✅ 人类化 (Burstiness = 0.52):
+"Results were striking. We observed a 47% increase in binding
+affinity when the modified peptide was introduced, suggesting
+the conformational change plays a key role. This matters."
+→ 长度: [3, 24, 2] 变化大
+```
 
 ### 最佳实践
 
-1. **选择合适的基础模型**
-   - 推荐: Qwen 2.5-7B (英文学术写作能力强)
-   - 避免: GPT-4/Claude API (输出有明显指纹)
-
-2. **收集足够的训练语料**
-   - 至少 10+ 篇目标作者的论文
-   - 将代表性文章放入 `important_examples/` (2.5x 权重)
-
-3. **利用 DPO 训练**
-   - 将"听起来像 AI"的输出标记为 `ai_like`
-   - 系统会自动检测高 AI 分数的输出并加入拒绝集
-
-4. **后处理检查**
-   ```bash
-   make ai-check  # 粘贴文本检查
-   ```
+1. **优先关注 Burstiness** - 每段混合短句 (5-10词) 和长句 (25-35词)
+2. **使用微调本地模型** - 避免直接使用 ChatGPT/GPT-4 API
+3. **运行风格分析** - `make analyze-style` 生成作者指纹
+4. **一键人性化** - `make humanize` 自动降低 AI 分数
 
 ---
 

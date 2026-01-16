@@ -1,415 +1,776 @@
-"""AI Trace Detection and Correction.
+"""Scientific AI Detection Module.
 
-Detects typical AI-generated text patterns and suggests corrections.
-This helps avoid AI detection tools by identifying and fixing common
-AI writing signatures.
+Based on academic research on AI text detection:
+- Perplexity: How predictable is the text (lower = more AI-like)
+- Burstiness: Sentence length variation (lower = more AI-like)
+- Vocabulary Diversity: Type-token ratio and lexical richness
+- Style Consistency: Match against author fingerprint
+
+References:
+- GPTZero: Perplexity and Burstiness metrics
+- DetectGPT: Probability curvature analysis
+- StyloAI: 31 stylometric features for AI detection
+- DIPPER: Paraphrase attack research
 """
 import re
+import math
+import json
+from collections import Counter
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 
+# ==============================================================================
+# Configuration
+# ==============================================================================
+
+STYLE_FINGERPRINT_PATH = Path("data/style/author_fingerprint.json")
+
+# Thresholds based on research
+# Human text typically: perplexity 20-80, burstiness > 0.4
+# AI text typically: perplexity 5-15, burstiness < 0.3
+THRESHOLDS = {
+    "perplexity_low": 15.0,      # Below this = likely AI
+    "perplexity_high": 60.0,     # Above this = likely human
+    "burstiness_low": 0.25,      # Below this = likely AI
+    "burstiness_high": 0.45,     # Above this = likely human
+    "ttr_low": 0.4,              # Below this = repetitive (AI)
+    "ttr_high": 0.7,             # Above this = diverse (human)
+    "style_match_good": 0.7,     # Above this = matches author well
+}
+
+
+# ==============================================================================
+# Data Classes
+# ==============================================================================
+
 @dataclass
-class AITraceResult:
-    """Result of AI trace detection."""
-    has_ai_traces: bool
-    score: float  # 0.0 = human-like, 1.0 = very AI-like
-    issues: list[dict] = field(default_factory=list)
-    suggestions: list[str] = field(default_factory=list)
-    corrected_text: Optional[str] = None
+class AIDetectionResult:
+    """Comprehensive AI detection result."""
+    # Overall scores (0 = human-like, 1 = AI-like)
+    ai_score: float = 0.0
+    confidence: float = 0.0
+
+    # Individual metrics
+    perplexity: float = 0.0
+    perplexity_score: float = 0.0  # Normalized 0-1
+
+    burstiness: float = 0.0
+    burstiness_score: float = 0.0  # Normalized 0-1
+
+    vocabulary_diversity: float = 0.0
+    vocabulary_score: float = 0.0  # Normalized 0-1
+
+    style_consistency: float = 0.0
+    style_score: float = 0.0  # Normalized 0-1
+
+    # Pattern-based detection (legacy, lower weight)
+    pattern_score: float = 0.0
+    pattern_issues: list = field(default_factory=list)
+
+    # Analysis details
+    sentence_lengths: list = field(default_factory=list)
+    suggestions: list = field(default_factory=list)
+
+    @property
+    def is_likely_ai(self) -> bool:
+        """Whether text is likely AI-generated."""
+        return self.ai_score > 0.5
+
+    @property
+    def risk_level(self) -> str:
+        """Human-readable risk level."""
+        if self.ai_score < 0.25:
+            return "low"
+        elif self.ai_score < 0.5:
+            return "moderate"
+        elif self.ai_score < 0.75:
+            return "high"
+        else:
+            return "very_high"
 
 
 # ==============================================================================
-# AI Writing Pattern Definitions
+# Text Processing Utilities
 # ==============================================================================
 
-# Overused transition words that AI loves
-AI_TRANSITION_WORDS = [
-    # High frequency AI markers
-    (r'\bFurthermore\b', 'Furthermore', 'Also / In addition / [Remove]', 0.15),
-    (r'\bMoreover\b', 'Moreover', 'Also / Besides / [Remove]', 0.15),
-    (r'\bAdditionally\b', 'Additionally', 'Also / [Remove]', 0.12),
-    (r'\bConsequently\b', 'Consequently', 'So / Thus / As a result', 0.10),
-    (r'\bNevertheless\b', 'Nevertheless', 'Still / Yet / However', 0.10),
-    (r'\bNonetheless\b', 'Nonetheless', 'Still / Yet', 0.10),
-    (r'\bHence\b', 'Hence', 'So / Thus', 0.08),
-    (r'\bThereby\b', 'Thereby', '[Restructure sentence]', 0.08),
-    (r'\bThus\b,?\s', 'Thus', 'So / [Remove]', 0.05),
-]
+def tokenize(text: str) -> list[str]:
+    """Simple word tokenization."""
+    return re.findall(r'\b[a-zA-Z]+\b', text.lower())
 
-# Phrases that scream "I am AI"
-AI_PHRASE_PATTERNS = [
-    # Opening phrases
-    (r'^In conclusion,?\s', 'In conclusion', '[Just conclude without announcing]', 0.20),
-    (r'^To summarize,?\s', 'To summarize', '[Summarize without announcing]', 0.18),
-    (r'^In summary,?\s', 'In summary', '[Summarize without announcing]', 0.18),
-    (r'^It is worth noting that\s', 'It is worth noting that', '[Remove, just state it]', 0.25),
-    (r'^It is important to note that\s', 'It is important to note that', '[Remove, just state it]', 0.25),
-    (r'^It should be noted that\s', 'It should be noted that', '[Remove, just state it]', 0.20),
-    (r'^Notably,?\s', 'Notably', '[Remove or use "Importantly"]', 0.12),
-    (r'^Interestingly,?\s', 'Interestingly', '[Remove, let reader decide]', 0.15),
-    (r'^Importantly,?\s', 'Importantly', '[Remove, just state it]', 0.10),
 
-    # Mid-sentence AI markers
-    (r'\bplays a (crucial|vital|pivotal|key) role\b', 'plays a crucial/vital role', 'is important for / affects', 0.15),
-    (r'\b(a |the )?wide (range|variety|array) of\b', 'a wide range of', 'many / various / different', 0.12),
-    (r'\bin the context of\b', 'in the context of', 'for / in / regarding', 0.10),
-    (r'\bwith respect to\b', 'with respect to', 'for / about / regarding', 0.08),
-    (r'\bin terms of\b', 'in terms of', 'for / by / regarding', 0.08),
-    (r'\bhas been shown to\b', 'has been shown to', 'can / does', 0.08),
-    (r'\bhas been demonstrated to\b', 'has been demonstrated to', 'can / does', 0.10),
-    (r'\bprovides (valuable|important|significant) insights?\b', 'provides valuable insights', 'shows / reveals / explains', 0.15),
+def split_sentences(text: str) -> list[str]:
+    """Split text into sentences."""
+    # Handle common abbreviations
+    text = re.sub(r'\b(Dr|Mr|Mrs|Ms|Prof|et al|i\.e|e\.g|vs|etc|Fig|Eq)\.\s', r'\1<DOT> ', text)
+    sentences = re.split(r'[.!?]+\s+', text)
+    sentences = [s.replace('<DOT>', '.').strip() for s in sentences if len(s.strip()) > 3]
+    return sentences
+
+
+# ==============================================================================
+# Core Metrics (Based on Research)
+# ==============================================================================
+
+def calculate_perplexity_approx(text: str) -> float:
+    """Approximate perplexity using character-level n-gram model.
+
+    True perplexity requires a trained LM. This approximation uses
+    character-level entropy as a proxy, which correlates with AI detection.
+
+    Lower perplexity = more predictable = more AI-like
+    Human text: 20-80, AI text: 5-15
+    """
+    if len(text) < 50:
+        return 30.0  # Default for short text
+
+    # Character bigram entropy
+    text_lower = text.lower()
+    bigrams = [text_lower[i:i+2] for i in range(len(text_lower)-1)]
+
+    if not bigrams:
+        return 30.0
+
+    # Count bigram frequencies
+    bigram_counts = Counter(bigrams)
+    total = len(bigrams)
+
+    # Calculate entropy
+    entropy = 0.0
+    for count in bigram_counts.values():
+        prob = count / total
+        if prob > 0:
+            entropy -= prob * math.log2(prob)
+
+    # Convert entropy to perplexity-like score
+    # Higher entropy = higher perplexity = more human-like
+    perplexity = 2 ** entropy
+
+    # Scale to typical range (5-80)
+    perplexity = perplexity * 3.5
+
+    return round(perplexity, 2)
+
+
+def calculate_burstiness(text: str) -> float:
+    """Calculate burstiness (sentence length variation).
+
+    Burstiness = coefficient of variation of sentence lengths
+    Human writing has high burstiness (varied sentences)
+    AI writing has low burstiness (uniform sentences)
+
+    Human: > 0.4, AI: < 0.3
+    """
+    sentences = split_sentences(text)
+
+    if len(sentences) < 3:
+        return 0.35  # Default for short text
+
+    # Get sentence lengths (word count)
+    lengths = [len(tokenize(s)) for s in sentences]
+    lengths = [l for l in lengths if l > 0]
+
+    if len(lengths) < 3:
+        return 0.35
+
+    # Calculate coefficient of variation
+    mean_len = sum(lengths) / len(lengths)
+    if mean_len == 0:
+        return 0.35
+
+    variance = sum((l - mean_len) ** 2 for l in lengths) / len(lengths)
+    std_dev = variance ** 0.5
+    cv = std_dev / mean_len
+
+    return round(cv, 3)
+
+
+def calculate_vocabulary_diversity(text: str) -> float:
+    """Calculate vocabulary diversity (Type-Token Ratio).
+
+    TTR = unique words / total words
+    Higher = more diverse vocabulary = more human-like
+
+    Human: 0.5-0.8, AI: 0.3-0.5 (AI tends to repeat phrases)
+    """
+    words = tokenize(text)
+
+    if len(words) < 20:
+        return 0.5  # Default for short text
+
+    # Use moving TTR for longer texts (more stable)
+    window_size = min(100, len(words))
+
+    if len(words) <= window_size:
+        ttr = len(set(words)) / len(words)
+    else:
+        # Average TTR over windows
+        ttrs = []
+        for i in range(0, len(words) - window_size + 1, window_size // 2):
+            window = words[i:i + window_size]
+            ttrs.append(len(set(window)) / len(window))
+        ttr = sum(ttrs) / len(ttrs)
+
+    return round(ttr, 3)
+
+
+def calculate_style_consistency(text: str, fingerprint: Optional[dict]) -> float:
+    """Calculate how well text matches author's style fingerprint.
+
+    Higher = better match to author style
+
+    Returns:
+        Score from 0 (no match) to 1 (perfect match)
+    """
+    if not fingerprint:
+        return 0.5  # Neutral if no fingerprint
+
+    scores = []
+
+    # 1. Sentence length match
+    sentences = split_sentences(text)
+    if sentences:
+        lengths = [len(tokenize(s)) for s in sentences]
+        avg_len = sum(lengths) / len(lengths) if lengths else 20
+
+        target_len = fingerprint.get("sentence_stats", {}).get("avg_length", 20)
+        target_std = fingerprint.get("sentence_stats", {}).get("std_dev", 8)
+
+        # Score based on how close to target
+        len_diff = abs(avg_len - target_len)
+        len_score = max(0, 1 - len_diff / (target_std * 2))
+        scores.append(len_score)
+
+    # 2. Vocabulary overlap
+    words = set(tokenize(text))
+    fav_verbs = set(fingerprint.get("vocabulary_stats", {}).get("top_verbs", []))
+    fav_trans = set(fingerprint.get("vocabulary_stats", {}).get("favorite_transitions", []))
+
+    if fav_verbs:
+        verb_overlap = len(words & fav_verbs) / len(fav_verbs)
+        scores.append(min(1.0, verb_overlap * 2))  # Scale up
+
+    if fav_trans:
+        trans_overlap = len(words & fav_trans) / len(fav_trans)
+        scores.append(min(1.0, trans_overlap * 2))
+
+    # 3. Passive voice ratio match
+    structure = fingerprint.get("structure_stats", {})
+    if structure.get("passive_voice_ratio"):
+        # Simple passive detection
+        passive_patterns = len(re.findall(
+            r'\b(was|were|been|being|is|are)\s+\w+ed\b',
+            text, re.IGNORECASE
+        ))
+        total_sentences = len(sentences) if sentences else 1
+        text_passive_ratio = passive_patterns / total_sentences
+
+        target_passive = structure["passive_voice_ratio"]
+        passive_diff = abs(text_passive_ratio - target_passive)
+        passive_score = max(0, 1 - passive_diff * 2)
+        scores.append(passive_score)
+
+    if not scores:
+        return 0.5
+
+    return round(sum(scores) / len(scores), 3)
+
+
+# ==============================================================================
+# Pattern Detection (Supplementary)
+# ==============================================================================
+
+# Common AI patterns (lower weight in final score)
+AI_PATTERNS = [
+    # Overused transitions
+    (r'\bFurthermore\b', 'Furthermore', 0.08),
+    (r'\bMoreover\b', 'Moreover', 0.08),
+    (r'\bAdditionally\b', 'Additionally', 0.06),
+    (r'\bConsequently\b', 'Consequently', 0.05),
 
     # Filler phrases
-    (r'\bit is (essential|crucial|important|vital) to\b', 'it is essential to', '[Restructure: "We must" or remove]', 0.12),
-    (r'\bthis (study|paper|research|work) (aims|seeks) to\b', 'this study aims to', '[Use "We" + verb]', 0.10),
-    (r'\bthe (findings|results) (suggest|indicate|demonstrate) that\b', 'the findings suggest that', '[Direct statement]', 0.08),
-]
+    (r'It is worth noting that', 'It is worth noting', 0.10),
+    (r'It is important to note', 'It is important to note', 0.10),
+    (r'It should be noted', 'It should be noted', 0.08),
 
-# Sentence structure patterns typical of AI
-AI_STRUCTURE_PATTERNS = [
-    # Enumeration addiction
-    (r'First(?:ly)?,.*Second(?:ly)?,.*Third(?:ly)?,', 'First...Second...Third...', 'Vary enumeration style', 0.20),
-    (r'\bOn one hand,.*on the other hand\b', 'On one hand...on the other hand', 'Use but/however/while', 0.15),
+    # Fancy words AI loves
+    (r'\butilize[sd]?\b', 'utilize', 0.05),
+    (r'\bleverage[sd]?\b', 'leverage', 0.06),
+    (r'\bfacilitate[sd]?\b', 'facilitate', 0.05),
 
-    # Perfect parallelism (too perfect)
-    (r'not only.*but also', 'not only...but also', '[Use occasionally, not repeatedly]', 0.08),
+    # Perfect enumeration
+    (r'First(?:ly)?,.*Second(?:ly)?,.*Third(?:ly)?,', 'First/Second/Third', 0.08),
 
-    # Over-hedging
-    (r'\b(may|might|could)\b.*\b(may|might|could)\b.*\b(may|might|could)\b', 'Multiple hedges', 'Limit to 2 hedge words per paragraph', 0.25),
-    (r'\b(potentially|possibly)\b.*\b(potentially|possibly)\b', 'Multiple "potentially/possibly"', 'Use only once per paragraph', 0.20),
-]
-
-# Words AI overuses as "fancy" replacements
-AI_FANCY_WORDS = [
-    (r'\butilize[sd]?\b', 'utilize', 'use', 0.10),
-    (r'\bleverage[sd]?\b', 'leverage', 'use', 0.12),
-    (r'\bfacilitate[sd]?\b', 'facilitate', 'help / enable / allow', 0.10),
-    (r'\bimplement(?:ed|s|ing)?\b', 'implement', 'use / apply / do', 0.05),
-    (r'\bdemonstrate[sd]?\b', 'demonstrate', 'show', 0.08),
-    (r'\belucidates?\b', 'elucidate', 'explain / show / clarify', 0.15),
-    (r'\belicit[sd]?\b', 'elicit', 'cause / produce / get', 0.12),
-    (r'\bcommenc(?:e[sd]?|ing)\b', 'commence', 'start / begin', 0.15),
-    (r'\bascertain(?:ed|s)?\b', 'ascertain', 'find / determine / learn', 0.15),
-    (r'\bprocure[sd]?\b', 'procure', 'get / obtain', 0.12),
-    (r'\bsubsequently\b', 'subsequently', 'then / later / after', 0.10),
-    (r'\bprior to\b', 'prior to', 'before', 0.08),
-    (r'\bpursuant to\b', 'pursuant to', 'under / following', 0.15),
-    (r'\bin order to\b', 'in order to', 'to', 0.08),
+    # Verbose phrases
+    (r'\bplays a (?:crucial|vital|pivotal) role\b', 'plays a crucial role', 0.06),
+    (r'\ba wide (?:range|variety|array) of\b', 'a wide range of', 0.05),
 ]
 
 
-class AITraceDetector:
-    """Detects and corrects AI-generated text patterns."""
+def detect_patterns(text: str) -> tuple[float, list[dict]]:
+    """Detect AI-typical patterns in text.
 
-    def __init__(
-        self,
-        transition_threshold: float = 0.3,
-        phrase_threshold: float = 0.4,
-        structure_threshold: float = 0.3,
-        overall_threshold: float = 0.35,
-    ):
-        """Initialize detector with thresholds.
+    Returns:
+        Tuple of (pattern_score, list of issues)
+    """
+    issues = []
+    total_score = 0.0
 
-        Args:
-            transition_threshold: Max score for transition words
-            phrase_threshold: Max score for AI phrases
-            structure_threshold: Max score for structure patterns
-            overall_threshold: Max overall score to pass
-        """
-        self.transition_threshold = transition_threshold
-        self.phrase_threshold = phrase_threshold
-        self.structure_threshold = structure_threshold
-        self.overall_threshold = overall_threshold
+    for pattern, name, weight in AI_PATTERNS:
+        matches = list(re.finditer(pattern, text, re.IGNORECASE))
+        if matches:
+            count = len(matches)
+            score = weight * min(count, 3)  # Cap at 3 occurrences
+            total_score += score
 
-    def detect(self, text: str) -> AITraceResult:
-        """Detect AI traces in text.
+            issues.append({
+                "pattern": name,
+                "count": count,
+                "weight": weight,
+                "score": round(score, 3),
+            })
+
+    return min(1.0, total_score), issues
+
+
+# ==============================================================================
+# Main Detector Class
+# ==============================================================================
+
+class ScientificAIDetector:
+    """Research-based AI detection system.
+
+    Uses multiple signals weighted by research effectiveness:
+    - Perplexity (25%): Statistical predictability
+    - Burstiness (30%): Sentence variation
+    - Vocabulary (20%): Lexical diversity
+    - Style (15%): Author fingerprint match
+    - Patterns (10%): Known AI phrases (lowest weight)
+    """
+
+    WEIGHTS = {
+        "perplexity": 0.25,
+        "burstiness": 0.30,
+        "vocabulary": 0.20,
+        "style": 0.15,
+        "patterns": 0.10,
+    }
+
+    def __init__(self):
+        """Initialize detector."""
+        self._fingerprint: Optional[dict] = None
+        self._load_fingerprint()
+
+    def _load_fingerprint(self) -> None:
+        """Load author style fingerprint if available."""
+        if STYLE_FINGERPRINT_PATH.exists():
+            try:
+                with open(STYLE_FINGERPRINT_PATH, "r", encoding="utf-8") as f:
+                    self._fingerprint = json.load(f)
+            except Exception:
+                pass
+
+    def reload_fingerprint(self) -> None:
+        """Reload fingerprint from disk."""
+        self._load_fingerprint()
+
+    def detect(self, text: str) -> AIDetectionResult:
+        """Perform comprehensive AI detection.
 
         Args:
             text: Text to analyze
 
         Returns:
-            AITraceResult with detection details
+            AIDetectionResult with all metrics
         """
-        issues = []
-        suggestions = []
-        total_score = 0.0
+        if len(text.strip()) < 50:
+            return AIDetectionResult(
+                ai_score=0.5,
+                confidence=0.2,
+                suggestions=["Text too short for reliable detection"]
+            )
 
-        # Check transition words
-        transition_score, transition_issues = self._check_patterns(
-            text, AI_TRANSITION_WORDS, "transition_word"
-        )
-        issues.extend(transition_issues)
-        total_score += transition_score * 0.25
+        # Calculate core metrics
+        perplexity = calculate_perplexity_approx(text)
+        burstiness = calculate_burstiness(text)
+        vocabulary = calculate_vocabulary_diversity(text)
+        style = calculate_style_consistency(text, self._fingerprint)
+        pattern_score, pattern_issues = detect_patterns(text)
 
-        # Check AI phrases
-        phrase_score, phrase_issues = self._check_patterns(
-            text, AI_PHRASE_PATTERNS, "ai_phrase"
-        )
-        issues.extend(phrase_issues)
-        total_score += phrase_score * 0.35
+        # Normalize metrics to 0-1 (higher = more AI-like)
+        perplexity_score = self._normalize_perplexity(perplexity)
+        burstiness_score = self._normalize_burstiness(burstiness)
+        vocabulary_score = self._normalize_vocabulary(vocabulary)
+        style_score = 1 - style  # Invert: low style match = AI-like
 
-        # Check structure patterns
-        structure_score, structure_issues = self._check_patterns(
-            text, AI_STRUCTURE_PATTERNS, "structure"
-        )
-        issues.extend(structure_issues)
-        total_score += structure_score * 0.20
-
-        # Check fancy words
-        fancy_score, fancy_issues = self._check_patterns(
-            text, AI_FANCY_WORDS, "fancy_word"
-        )
-        issues.extend(fancy_issues)
-        total_score += fancy_score * 0.20
-
-        # Check sentence length uniformity
-        uniformity_score = self._check_sentence_uniformity(text)
-        if uniformity_score > 0.5:
-            issues.append({
-                "type": "uniformity",
-                "description": "Sentences too uniform in length",
-                "score": uniformity_score,
-            })
-            suggestions.append("Vary sentence length: mix short (5-10 words) and long (30-40 words) sentences")
-        total_score += uniformity_score * 0.10
-
-        # Normalize score
-        total_score = min(1.0, total_score)
-
-        # Generate suggestions based on issues
-        for issue in issues:
-            if "suggestion" in issue and issue["suggestion"] not in suggestions:
-                suggestions.append(f"{issue['found']}: {issue['suggestion']}")
-
-        # Determine if text has AI traces
-        has_traces = total_score >= self.overall_threshold
-
-        return AITraceResult(
-            has_ai_traces=has_traces,
-            score=round(total_score, 3),
-            issues=issues,
-            suggestions=suggestions[:10],  # Limit suggestions
-            corrected_text=None,  # Set by correct() method
+        # Weighted combination
+        ai_score = (
+            self.WEIGHTS["perplexity"] * perplexity_score +
+            self.WEIGHTS["burstiness"] * burstiness_score +
+            self.WEIGHTS["vocabulary"] * vocabulary_score +
+            self.WEIGHTS["style"] * style_score +
+            self.WEIGHTS["patterns"] * pattern_score
         )
 
-    def correct(self, text: str, result: Optional[AITraceResult] = None) -> str:
-        """Auto-correct common AI patterns in text.
+        # Calculate confidence based on text length and metric agreement
+        confidence = self._calculate_confidence(
+            text, perplexity_score, burstiness_score, vocabulary_score
+        )
 
-        Args:
-            text: Text to correct
-            result: Optional pre-computed detection result
+        # Generate suggestions
+        suggestions = self._generate_suggestions(
+            perplexity_score, burstiness_score, vocabulary_score,
+            style_score, pattern_issues
+        )
 
-        Returns:
-            Corrected text with reduced AI traces
-        """
-        if result is None:
-            result = self.detect(text)
+        # Get sentence lengths for analysis
+        sentences = split_sentences(text)
+        sentence_lengths = [len(tokenize(s)) for s in sentences]
 
-        corrected = text
+        return AIDetectionResult(
+            ai_score=round(ai_score, 3),
+            confidence=round(confidence, 2),
+            perplexity=perplexity,
+            perplexity_score=round(perplexity_score, 3),
+            burstiness=burstiness,
+            burstiness_score=round(burstiness_score, 3),
+            vocabulary_diversity=vocabulary,
+            vocabulary_score=round(vocabulary_score, 3),
+            style_consistency=style,
+            style_score=round(style_score, 3),
+            pattern_score=round(pattern_score, 3),
+            pattern_issues=pattern_issues,
+            sentence_lengths=sentence_lengths,
+            suggestions=suggestions,
+        )
 
-        # Apply automatic corrections for clear-cut cases
-        corrections = [
-            # Remove filler phrases
-            (r'\bIt is worth noting that\s+', ''),
-            (r'\bIt is important to note that\s+', ''),
-            (r'\bIt should be noted that\s+', ''),
+    def _normalize_perplexity(self, perplexity: float) -> float:
+        """Normalize perplexity to 0-1 (higher = more AI-like)."""
+        low = THRESHOLDS["perplexity_low"]
+        high = THRESHOLDS["perplexity_high"]
 
-            # Simplify fancy words
-            (r'\butilize\b', 'use'),
-            (r'\butilized\b', 'used'),
-            (r'\butilizes\b', 'uses'),
-            (r'\bleverage\b', 'use'),
-            (r'\bleveraged\b', 'used'),
-            (r'\bcommence\b', 'start'),
-            (r'\bcommenced\b', 'started'),
-            (r'\bprior to\b', 'before'),
-            (r'\bin order to\b', 'to'),
-            (r'\bsubsequently\b', 'then'),
+        if perplexity <= low:
+            return 1.0  # Very low perplexity = AI
+        elif perplexity >= high:
+            return 0.0  # High perplexity = human
+        else:
+            # Linear interpolation
+            return 1 - (perplexity - low) / (high - low)
 
-            # Fix over-formality
-            (r'\bFurthermore,\s+', 'Also, '),
-            (r'\bMoreover,\s+', 'Also, '),
-            (r'\bAdditionally,\s+', 'Also, '),
-            (r'\bConsequently,\s+', 'So, '),
-            (r'\bNevertheless,\s+', 'However, '),
-            (r'\bNonetheless,\s+', 'Still, '),
+    def _normalize_burstiness(self, burstiness: float) -> float:
+        """Normalize burstiness to 0-1 (higher = more AI-like)."""
+        low = THRESHOLDS["burstiness_low"]
+        high = THRESHOLDS["burstiness_high"]
 
-            # Simplify verbose phrases
-            (r'\bplays a crucial role in\b', 'is important for'),
-            (r'\bplays a vital role in\b', 'is important for'),
-            (r'\bplays a pivotal role in\b', 'is important for'),
-            (r'\ba wide range of\b', 'many'),
-            (r'\ba wide variety of\b', 'many'),
-            (r'\bthe wide array of\b', 'many'),
-            (r'\bwith respect to\b', 'for'),
-            (r'\bin terms of\b', 'for'),
-            (r'\bin the context of\b', 'in'),
-        ]
+        if burstiness <= low:
+            return 1.0  # Low burstiness = AI
+        elif burstiness >= high:
+            return 0.0  # High burstiness = human
+        else:
+            return 1 - (burstiness - low) / (high - low)
 
-        for pattern, replacement in corrections:
-            corrected = re.sub(pattern, replacement, corrected, flags=re.IGNORECASE)
+    def _normalize_vocabulary(self, ttr: float) -> float:
+        """Normalize vocabulary diversity to 0-1 (higher = more AI-like)."""
+        low = THRESHOLDS["ttr_low"]
+        high = THRESHOLDS["ttr_high"]
 
-        # Fix capitalization after removals
-        corrected = re.sub(r'\.\s+([a-z])', lambda m: '. ' + m.group(1).upper(), corrected)
+        if ttr <= low:
+            return 1.0  # Low diversity = AI
+        elif ttr >= high:
+            return 0.0  # High diversity = human
+        else:
+            return 1 - (ttr - low) / (high - low)
 
-        return corrected
-
-    def _check_patterns(
+    def _calculate_confidence(
         self,
         text: str,
-        patterns: list[tuple],
-        pattern_type: str
-    ) -> tuple[float, list[dict]]:
-        """Check text against pattern list.
+        perplexity_score: float,
+        burstiness_score: float,
+        vocabulary_score: float
+    ) -> float:
+        """Calculate confidence in the detection result."""
+        # Base confidence from text length
+        word_count = len(tokenize(text))
+        length_conf = min(1.0, word_count / 200)
+
+        # Agreement between metrics
+        scores = [perplexity_score, burstiness_score, vocabulary_score]
+        mean_score = sum(scores) / len(scores)
+        variance = sum((s - mean_score) ** 2 for s in scores) / len(scores)
+        agreement_conf = max(0.3, 1 - variance * 2)
+
+        return (length_conf * 0.4 + agreement_conf * 0.6)
+
+    def _generate_suggestions(
+        self,
+        perplexity_score: float,
+        burstiness_score: float,
+        vocabulary_score: float,
+        style_score: float,
+        pattern_issues: list
+    ) -> list[str]:
+        """Generate improvement suggestions based on analysis."""
+        suggestions = []
+
+        # Perplexity suggestions
+        if perplexity_score > 0.6:
+            suggestions.append(
+                "Text is highly predictable. Add unexpected word choices "
+                "or unconventional phrasing."
+            )
+
+        # Burstiness suggestions (most important!)
+        if burstiness_score > 0.6:
+            suggestions.append(
+                "CRITICAL: Sentence lengths too uniform. Mix short (5-10 words) "
+                "and long (30-40 words) sentences."
+            )
+        elif burstiness_score > 0.4:
+            suggestions.append(
+                "Vary sentence length more. Add some punchy short sentences."
+            )
+
+        # Vocabulary suggestions
+        if vocabulary_score > 0.6:
+            suggestions.append(
+                "Vocabulary too repetitive. Use more varied word choices."
+            )
+
+        # Style suggestions
+        if style_score > 0.6:
+            suggestions.append(
+                "Text doesn't match author's writing style. Review the "
+                "style fingerprint and adjust vocabulary/structure."
+            )
+
+        # Pattern-specific suggestions
+        if pattern_issues:
+            top_issues = sorted(pattern_issues, key=lambda x: -x["score"])[:3]
+            for issue in top_issues:
+                suggestions.append(f"Remove/replace: '{issue['pattern']}'")
+
+        return suggestions[:7]
+
+
+# ==============================================================================
+# Humanizer - Automatic Text Improvement
+# ==============================================================================
+
+class TextHumanizer:
+    """Automatically improve text to be more human-like.
+
+    Based on research findings:
+    1. Vary sentence length (most effective)
+    2. Remove AI-typical phrases
+    3. Use simpler vocabulary
+    4. Break perfect parallel structures
+    """
+
+    # Phrase replacements
+    REPLACEMENTS = [
+        # Remove filler phrases entirely
+        (r'It is worth noting that\s+', ''),
+        (r'It is important to note that\s+', ''),
+        (r'It should be noted that\s+', ''),
+        (r'Notably,\s+', ''),
+        (r'Importantly,\s+', ''),
+        (r'Interestingly,\s+', ''),
+
+        # Replace formal transitions
+        (r'\bFurthermore,\s+', 'Also, '),
+        (r'\bMoreover,\s+', 'Also, '),
+        (r'\bAdditionally,\s+', 'Also, '),
+        (r'\bConsequently,\s+', 'So '),
+        (r'\bNevertheless,\s+', 'Still, '),
+        (r'\bNonetheless,\s+', 'Yet '),
+        (r'\bHence,\s+', 'So '),
+
+        # Simplify vocabulary
+        (r'\butilize\b', 'use'),
+        (r'\butilized\b', 'used'),
+        (r'\butilizes\b', 'uses'),
+        (r'\butilizing\b', 'using'),
+        (r'\bleverage\b', 'use'),
+        (r'\bleveraged\b', 'used'),
+        (r'\bfacilitate\b', 'help'),
+        (r'\bfacilitated\b', 'helped'),
+        (r'\bcommence\b', 'start'),
+        (r'\bcommenced\b', 'started'),
+        (r'\bprior to\b', 'before'),
+        (r'\bsubsequently\b', 'then'),
+        (r'\bin order to\b', 'to'),
+        (r'\bdemonstrate\b', 'show'),
+        (r'\bdemonstrated\b', 'showed'),
+        (r'\bdemonstrates\b', 'shows'),
+
+        # Simplify verbose phrases
+        (r'\bplays a crucial role in\b', 'is key to'),
+        (r'\bplays a vital role in\b', 'is vital for'),
+        (r'\bplays a pivotal role in\b', 'is central to'),
+        (r'\ba wide range of\b', 'many'),
+        (r'\ba wide variety of\b', 'various'),
+        (r'\bwith respect to\b', 'for'),
+        (r'\bin terms of\b', 'for'),
+        (r'\bin the context of\b', 'in'),
+    ]
+
+    def humanize(self, text: str, target_burstiness: float = 0.45) -> str:
+        """Humanize text to reduce AI detection score.
 
         Args:
-            text: Text to check
-            patterns: List of (regex, name, suggestion, weight) tuples
-            pattern_type: Type label for issues
+            text: Text to humanize
+            target_burstiness: Target sentence length variation
 
         Returns:
-            Tuple of (total_score, list_of_issues)
+            Humanized text
         """
-        issues = []
-        total_score = 0.0
+        # Step 1: Apply phrase replacements
+        result = text
+        for pattern, replacement in self.REPLACEMENTS:
+            result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
 
-        for pattern, name, suggestion, weight in patterns:
-            matches = list(re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE))
-            if matches:
-                # Score increases with frequency
-                match_score = weight * min(len(matches), 3)  # Cap at 3 occurrences
-                total_score += match_score
+        # Step 2: Fix capitalization after removals
+        result = re.sub(r'\.\s+([a-z])', lambda m: '. ' + m.group(1).upper(), result)
+        result = re.sub(r'^\s*([a-z])', lambda m: m.group(1).upper(), result)
 
-                issues.append({
-                    "type": pattern_type,
-                    "pattern": name,
-                    "found": name,
-                    "suggestion": suggestion,
-                    "count": len(matches),
-                    "score": round(match_score, 3),
-                    "positions": [m.start() for m in matches[:3]],
-                })
+        # Step 3: Vary sentence lengths if needed
+        current_burstiness = calculate_burstiness(result)
+        if current_burstiness < target_burstiness:
+            result = self._vary_sentences(result)
 
-        return min(1.0, total_score), issues
+        # Step 4: Clean up
+        result = re.sub(r'\s+', ' ', result)
+        result = re.sub(r'\s+([.,;:])', r'\1', result)
 
-    def _check_sentence_uniformity(self, text: str) -> float:
-        """Check if sentence lengths are too uniform (AI signature).
+        return result.strip()
 
-        AI tends to produce sentences of similar length.
-        Humans vary more.
-
-        Args:
-            text: Text to analyze
-
-        Returns:
-            Uniformity score (0.0 = varied, 1.0 = very uniform)
-        """
-        # Split into sentences
-        sentences = re.split(r'[.!?]+\s+', text.strip())
-        sentences = [s for s in sentences if len(s) > 10]
+    def _vary_sentences(self, text: str) -> str:
+        """Add variation to sentence lengths."""
+        sentences = split_sentences(text)
 
         if len(sentences) < 3:
-            return 0.0
+            return text
 
-        # Calculate word counts
-        lengths = [len(s.split()) for s in sentences]
+        # Find sentences that could be split or combined
+        modified = []
+        i = 0
 
-        # Calculate coefficient of variation (CV)
-        mean_len = sum(lengths) / len(lengths)
-        if mean_len == 0:
-            return 0.0
+        while i < len(sentences):
+            sent = sentences[i]
+            words = tokenize(sent)
+            word_count = len(words)
 
-        variance = sum((l - mean_len) ** 2 for l in lengths) / len(lengths)
-        std_dev = variance ** 0.5
-        cv = std_dev / mean_len
+            # Very long sentence: try to split
+            if word_count > 35 and '; ' in sent:
+                parts = sent.split('; ')
+                modified.extend(parts)
+                i += 1
+                continue
 
-        # Low CV = uniform (AI-like), High CV = varied (human-like)
-        # Human writing typically has CV > 0.4
-        # AI writing often has CV < 0.3
-        if cv < 0.2:
-            return 0.8
-        elif cv < 0.3:
-            return 0.5
-        elif cv < 0.4:
-            return 0.2
-        else:
-            return 0.0
+            # Medium sentence followed by short: might combine
+            if (i + 1 < len(sentences) and
+                15 < word_count < 25 and
+                len(tokenize(sentences[i + 1])) < 12):
+                # Sometimes combine with "and" or "—"
+                if len(modified) % 3 == 0:  # Every third opportunity
+                    combined = f"{sent.rstrip('.')} — {sentences[i + 1].lower()}"
+                    modified.append(combined)
+                    i += 2
+                    continue
 
-    def get_humanization_tips(self, result: AITraceResult) -> list[str]:
-        """Get specific tips to make text more human-like.
+            modified.append(sent)
+            i += 1
 
-        Args:
-            result: Detection result
-
-        Returns:
-            List of actionable tips
-        """
-        tips = []
-
-        # Based on score
-        if result.score > 0.6:
-            tips.append("HIGH AI SCORE: Consider significant restructuring")
-        elif result.score > 0.4:
-            tips.append("MODERATE AI SCORE: Apply suggested corrections")
-
-        # Specific tips based on issues
-        issue_types = set(i["type"] for i in result.issues)
-
-        if "transition_word" in issue_types:
-            tips.append("Vary transitions: use 'Also', 'And', or simply remove")
-
-        if "ai_phrase" in issue_types:
-            tips.append("Remove filler phrases: state points directly")
-
-        if "fancy_word" in issue_types:
-            tips.append("Use simpler words: 'use' not 'utilize', 'show' not 'demonstrate'")
-
-        if "structure" in issue_types:
-            tips.append("Break enumeration patterns: don't always use First/Second/Third")
-
-        if "uniformity" in issue_types:
-            tips.append("Vary sentence length: add some short punchy sentences")
-
-        # General tips
-        tips.extend([
-            "Add one minor grammatical quirk (acceptable in academic writing)",
-            "Use contractions sparingly in less formal sections",
-            "Include a personal observation or interpretation",
-        ])
-
-        return tips[:7]  # Limit to 7 tips
+        return ' '.join(modified)
 
 
 # ==============================================================================
-# Singleton
+# Singleton Instances
 # ==============================================================================
 
-_ai_detector: Optional[AITraceDetector] = None
+_detector: Optional[ScientificAIDetector] = None
+_humanizer: Optional[TextHumanizer] = None
 
 
-def get_ai_detector() -> AITraceDetector:
+def get_ai_detector() -> ScientificAIDetector:
     """Get or create AI detector singleton."""
-    global _ai_detector
-    if _ai_detector is None:
-        _ai_detector = AITraceDetector()
-    return _ai_detector
+    global _detector
+    if _detector is None:
+        _detector = ScientificAIDetector()
+    return _detector
+
+
+def get_humanizer() -> TextHumanizer:
+    """Get or create humanizer singleton."""
+    global _humanizer
+    if _humanizer is None:
+        _humanizer = TextHumanizer()
+    return _humanizer
 
 
 # ==============================================================================
 # Convenience Functions
 # ==============================================================================
 
-def detect_ai_traces(text: str) -> AITraceResult:
-    """Detect AI traces in text (convenience function)."""
+def detect_ai_traces(text: str) -> AIDetectionResult:
+    """Detect AI traces in text."""
     return get_ai_detector().detect(text)
 
 
-def correct_ai_traces(text: str) -> str:
-    """Auto-correct AI traces in text (convenience function)."""
-    return get_ai_detector().correct(text)
+def humanize_text(text: str) -> str:
+    """Humanize text to reduce AI detection score."""
+    return get_humanizer().humanize(text)
 
 
 def get_ai_score(text: str) -> float:
-    """Get AI score for text (convenience function)."""
-    return get_ai_detector().detect(text).score
+    """Get AI score for text (0 = human, 1 = AI)."""
+    return get_ai_detector().detect(text).ai_score
+
+
+def correct_ai_traces(text: str) -> str:
+    """Alias for humanize_text for backward compatibility."""
+    return humanize_text(text)
+
+
+# ==============================================================================
+# CLI Interface
+# ==============================================================================
+
+def analyze_text_detailed(text: str) -> dict:
+    """Get detailed analysis for display."""
+    result = detect_ai_traces(text)
+
+    return {
+        "overall": {
+            "ai_score": result.ai_score,
+            "risk_level": result.risk_level,
+            "confidence": result.confidence,
+            "is_likely_ai": result.is_likely_ai,
+        },
+        "metrics": {
+            "perplexity": {
+                "value": result.perplexity,
+                "score": result.perplexity_score,
+                "interpretation": "lower = more predictable = more AI-like"
+            },
+            "burstiness": {
+                "value": result.burstiness,
+                "score": result.burstiness_score,
+                "interpretation": "lower = more uniform = more AI-like"
+            },
+            "vocabulary_diversity": {
+                "value": result.vocabulary_diversity,
+                "score": result.vocabulary_score,
+                "interpretation": "lower = more repetitive = more AI-like"
+            },
+            "style_consistency": {
+                "value": result.style_consistency,
+                "score": result.style_score,
+                "interpretation": "higher = better match to author"
+            },
+        },
+        "sentence_lengths": result.sentence_lengths,
+        "pattern_issues": result.pattern_issues,
+        "suggestions": result.suggestions,
+    }

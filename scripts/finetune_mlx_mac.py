@@ -11,8 +11,11 @@ Requirements:
 Usage:
     python scripts/finetune_mlx_mac.py --model mistral --iters 1000
 
-    # Auto-detect settings based on your hardware
+    # Auto-detect settings based on your hardware (RECOMMENDED)
     python scripts/finetune_mlx_mac.py --auto
+
+    # Memory-safe mode with automatic preprocessing (RECOMMENDED for OOM)
+    python scripts/finetune_mlx_mac.py --auto --memory-safe
 
     # Use a specific profile
     python scripts/finetune_mlx_mac.py --profile mac_m1_16gb
@@ -23,6 +26,12 @@ After training:
 
     # Update .env
     VLLM_MODEL_NAME=gswa-gilles
+
+Memory Optimization Tips:
+    - Use --memory-safe to auto-preprocess long sequences
+    - Reduce --batch-size if OOM occurs
+    - Reduce --max-seq-length (512, 1024, 2048)
+    - Reduce --num-layers (4, 8, 16)
 """
 import argparse
 import json
@@ -271,6 +280,145 @@ def check_training_data(path: str) -> bool:
     print(f"\nTraining data: {path}")
     print(f"  Entries: {count}")
     return True
+
+
+# ==============================================================================
+# Memory-Safe Preprocessing
+# ==============================================================================
+
+def analyze_data_for_memory(input_file: str, max_seq_length: int) -> dict:
+    """
+    Analyze training data to check if preprocessing is needed.
+
+    Returns:
+        Dictionary with analysis results and recommendations
+    """
+    stats = {
+        'total_entries': 0,
+        'max_tokens': 0,
+        'over_limit': 0,
+        'needs_preprocessing': False,
+    }
+
+    try:
+        with open(input_file, 'r') as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                    stats['total_entries'] += 1
+
+                    # Extract text
+                    if 'text' in entry:
+                        text = entry['text']
+                    elif 'instruction' in entry:
+                        text = f"{entry.get('instruction', '')} {entry.get('input', '')} {entry.get('output', '')}"
+                    else:
+                        text = str(entry)
+
+                    # Estimate tokens (roughly 4 chars per token)
+                    tokens = len(text) // 4
+
+                    if tokens > stats['max_tokens']:
+                        stats['max_tokens'] = tokens
+
+                    if tokens > max_seq_length:
+                        stats['over_limit'] += 1
+
+                except json.JSONDecodeError:
+                    continue
+    except Exception as e:
+        print(f"  Warning: Could not analyze data: {e}")
+        return stats
+
+    stats['needs_preprocessing'] = stats['over_limit'] > 0
+    stats['over_limit_pct'] = (stats['over_limit'] / stats['total_entries'] * 100
+                               if stats['total_entries'] > 0 else 0)
+
+    return stats
+
+
+def preprocess_for_memory_safe(input_file: str, max_seq_length: int) -> str:
+    """
+    Preprocess training data to fit within max_seq_length.
+
+    Returns:
+        Path to preprocessed file
+    """
+    from pathlib import Path
+
+    # Try to import preprocessor
+    try:
+        # Add scripts directory to path
+        scripts_dir = Path(__file__).parent
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+
+        from preprocess_training_data import preprocess_training_data
+    except ImportError:
+        # Fallback: simple truncation
+        print("  Warning: preprocess_training_data.py not found, using simple truncation")
+        return input_file
+
+    input_path = Path(input_file)
+    output_path = input_path.with_suffix('.safe.jsonl')
+
+    print(f"\n  Preprocessing data for max_seq_length={max_seq_length}...")
+
+    result = preprocess_training_data(
+        input_file=input_file,
+        output_file=str(output_path),
+        max_tokens=max_seq_length,
+    )
+
+    print(f"  Preprocessed: {result['entries_before']} -> {result['entries_after']} entries")
+    print(f"  Max tokens: {result['max_tokens_before']} -> {result['max_tokens_after']}")
+
+    return str(output_path)
+
+
+def get_memory_safe_settings(memory_gb: float) -> dict:
+    """
+    Get memory-safe settings that are very conservative.
+    These settings should work even on systems with limited memory.
+    """
+    # Very conservative settings based on memory
+    if memory_gb < 12:
+        return {
+            'batch_size': 1,
+            'num_layers': 4,
+            'max_seq_length': 512,
+            'iters': 200,
+        }
+    elif memory_gb < 20:
+        return {
+            'batch_size': 1,
+            'num_layers': 8,
+            'max_seq_length': 768,
+            'iters': 300,
+        }
+    elif memory_gb < 32:
+        return {
+            'batch_size': 2,
+            'num_layers': 8,
+            'max_seq_length': 1024,
+            'iters': 500,
+        }
+    elif memory_gb < 64:
+        return {
+            'batch_size': 2,
+            'num_layers': 16,
+            'max_seq_length': 1536,
+            'iters': 800,
+        }
+    else:
+        return {
+            'batch_size': 4,
+            'num_layers': 16,
+            'max_seq_length': 2048,
+            'iters': 1000,
+        }
 
 
 # ==============================================================================
@@ -726,6 +874,17 @@ Available models:
         action="store_true",
         help="Only check dependencies, don't train"
     )
+    parser.add_argument(
+        "--memory-safe",
+        action="store_true",
+        help="Enable memory-safe mode: auto-preprocess long sequences and use conservative settings"
+    )
+    parser.add_argument(
+        "--retry-on-oom",
+        action="store_true",
+        default=True,
+        help="Automatically retry with reduced settings if OOM occurs (default: True)"
+    )
 
     args = parser.parse_args()
 
@@ -792,13 +951,96 @@ Available models:
     if not check_training_data(args.training_data):
         sys.exit(1)
 
-    # Run training
-    result = run_mlx_training(args)
+    # Memory-safe mode: analyze data and preprocess if needed
+    if args.memory_safe:
+        print("\n" + "=" * 60)
+        print("Memory-Safe Mode Enabled")
+        print("=" * 60)
 
-    if result:
-        sys.exit(0)
-    else:
-        sys.exit(1)
+        memory_gb = get_system_memory_gb()
+
+        # Get memory-safe settings
+        safe_settings = get_memory_safe_settings(memory_gb)
+        print(f"\n  Using memory-safe settings for {memory_gb:.0f}GB RAM:")
+        print(f"    batch_size: {safe_settings['batch_size']}")
+        print(f"    num_layers: {safe_settings['num_layers']}")
+        print(f"    max_seq_length: {safe_settings['max_seq_length']}")
+        print(f"    iters: {safe_settings['iters']}")
+
+        # Apply memory-safe settings
+        args.batch_size = safe_settings['batch_size']
+        args.num_layers = safe_settings['num_layers']
+        args.max_seq_length = safe_settings['max_seq_length']
+        args.iters = safe_settings['iters']
+
+        # Analyze data
+        print("\n  Analyzing training data...")
+        data_stats = analyze_data_for_memory(args.training_data, args.max_seq_length)
+
+        if data_stats['needs_preprocessing']:
+            print(f"\n  Found {data_stats['over_limit']} sequences over {args.max_seq_length} tokens")
+            print(f"  ({data_stats['over_limit_pct']:.1f}% of data)")
+            print(f"  Max tokens in data: {data_stats['max_tokens']}")
+
+            # Preprocess data
+            preprocessed_file = preprocess_for_memory_safe(args.training_data, args.max_seq_length)
+            args.training_data = preprocessed_file
+            print(f"\n  Using preprocessed data: {preprocessed_file}")
+        else:
+            print(f"\n  Data is already within {args.max_seq_length} token limit")
+
+    # Run training with retry logic
+    max_retries = 3 if args.retry_on_oom else 1
+    retry_count = 0
+
+    while retry_count < max_retries:
+        result = run_mlx_training(args)
+
+        if result:
+            sys.exit(0)
+        else:
+            # Check if it was an OOM error (we can detect from training log)
+            retry_count += 1
+
+            if retry_count < max_retries and args.retry_on_oom:
+                print(f"\n" + "=" * 60)
+                print(f"Training failed - Attempting retry {retry_count}/{max_retries-1}")
+                print("=" * 60)
+
+                # Reduce settings for retry
+                if args.batch_size > 1:
+                    args.batch_size = max(1, args.batch_size // 2)
+                    print(f"  Reduced batch_size to {args.batch_size}")
+                elif args.max_seq_length > 512:
+                    args.max_seq_length = max(512, args.max_seq_length // 2)
+                    print(f"  Reduced max_seq_length to {args.max_seq_length}")
+
+                    # Re-preprocess data if needed
+                    if args.memory_safe:
+                        preprocessed_file = preprocess_for_memory_safe(
+                            args.training_data.replace('.safe.jsonl', '.jsonl'),
+                            args.max_seq_length
+                        )
+                        args.training_data = preprocessed_file
+                elif args.num_layers > 4:
+                    args.num_layers = max(4, args.num_layers // 2)
+                    print(f"  Reduced num_layers to {args.num_layers}")
+                else:
+                    print("\n  Cannot reduce settings further. Please try a smaller model.")
+                    break
+            else:
+                break
+
+    print("\n" + "=" * 60)
+    print("Training Failed")
+    print("=" * 60)
+    print("\nTroubleshooting tips:")
+    print("  1. Try --memory-safe flag for automatic memory optimization")
+    print("  2. Manually reduce: --batch-size 1 --max-seq-length 512 --num-layers 4")
+    print("  3. Use a smaller model: --model phi3")
+    print("  4. Close other applications to free memory")
+    print("  5. Check 'Activity Monitor' for memory pressure")
+    sys.exit(1)
 
 
 if __name__ == "__main__":

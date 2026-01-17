@@ -1,4 +1,4 @@
-.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup-mac setup-ollama prepare-training finetune-lora finetune-mlx finetune-all finetune-smart list-docs training-stats check-deps check-mlx check-lora corpus corpus-add corpus-guide corpus-validate train train-auto train-model status models analyze-style style-show ai-check humanize
+.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup-mac setup-ollama prepare-training finetune-lora finetune-mlx finetune-mlx-safe finetune-all finetune-all-safe finetune-smart list-docs training-stats check-deps check-mlx check-lora corpus corpus-add corpus-guide corpus-validate train train-auto train-safe train-model status models analyze-style style-show ai-check humanize analyze-data preprocess-data
 
 # Default target
 help:
@@ -37,6 +37,7 @@ help:
 	@echo "  === Training Wizard (Recommended) ==="
 	@echo "  train             - One-click training wizard (interactive)"
 	@echo "  train-auto        - Fully automatic training (no prompts)"
+	@echo "  train-safe        - Memory-safe training (RECOMMENDED for OOM)"
 	@echo "  train-model       - Train with specific model (MODEL=qwen-7b)"
 	@echo "  status            - Show corpus and training status"
 	@echo "  models            - List available models"
@@ -44,9 +45,13 @@ help:
 	@echo "  === Fine-tuning (Advanced) ==="
 	@echo "  finetune-smart    - Smart training (auto-detect platform)"
 	@echo "  finetune-all      - Full pipeline: parse + train + finetune (Mac)"
+	@echo "  finetune-all-safe - Full pipeline with memory-safe mode (RECOMMENDED)"
 	@echo "  prepare-training  - Prepare training data from corpus"
+	@echo "  analyze-data      - Analyze training data (token lengths)"
+	@echo "  preprocess-data   - Preprocess data to split long sequences"
 	@echo "  finetune-lora     - Fine-tune with LoRA (Linux/Windows/GPU)"
 	@echo "  finetune-mlx      - Fine-tune with MLX (Mac Apple Silicon)"
+	@echo "  finetune-mlx-safe - Fine-tune with MLX (memory-safe mode)"
 	@echo "  export-dpo        - Export feedback for DPO training"
 	@echo "  list-docs         - List all document IDs in corpus"
 	@echo "  training-stats    - Show training data statistics"
@@ -154,11 +159,39 @@ finetune-lora: prepare-training
 finetune-mlx: prepare-training
 	python scripts/finetune_mlx_mac.py --auto
 
+# Fine-tune with MLX in memory-safe mode (RECOMMENDED for OOM errors)
+# Automatically preprocesses long sequences and uses conservative settings
+finetune-mlx-safe: prepare-training
+	@echo ""
+	@echo "============================================"
+	@echo "Starting Memory-Safe MLX Training"
+	@echo "============================================"
+	@echo ""
+	@echo "This mode will:"
+	@echo "  1. Automatically split long sequences"
+	@echo "  2. Use conservative memory settings"
+	@echo "  3. Retry with reduced settings if OOM occurs"
+	@echo ""
+	python scripts/finetune_mlx_mac.py --auto --memory-safe
+
 # One-click fine-tuning for Mac (parse + prepare + finetune)
 finetune-all: parse-corpus prepare-training finetune-mlx
 	@echo ""
 	@echo "============================================"
 	@echo "Fine-tuning complete!"
+	@echo "============================================"
+	@echo ""
+	@echo "Next steps:"
+	@echo "  1. ollama create gswa-gilles -f models/gswa-mlx-*/Modelfile"
+	@echo "  2. Add to .env: VLLM_MODEL_NAME=gswa-gilles"
+	@echo "  3. make run"
+
+# One-click fine-tuning for Mac with memory-safe mode (RECOMMENDED)
+# 一键傻瓜式训练（推荐用于内存不足问题）
+finetune-all-safe: parse-corpus prepare-training finetune-mlx-safe
+	@echo ""
+	@echo "============================================"
+	@echo "Memory-Safe Fine-tuning Complete!"
 	@echo "============================================"
 	@echo ""
 	@echo "Next steps:"
@@ -231,6 +264,23 @@ train:
 train-auto:
 	python scripts/training_wizard.py --auto
 
+# Memory-safe training (RECOMMENDED for OOM errors)
+# 傻瓜式一键训练（推荐）
+train-safe:
+	@echo ""
+	@echo "============================================"
+	@echo "GSWA Memory-Safe Training Mode"
+	@echo "傻瓜式一键训练模式"
+	@echo "============================================"
+	@echo ""
+	@echo "This will:"
+	@echo "  1. Parse corpus files (解析语料)"
+	@echo "  2. Prepare training data (准备训练数据)"
+	@echo "  3. Analyze and preprocess long sequences (预处理长序列)"
+	@echo "  4. Train with memory-safe settings (内存安全训练)"
+	@echo ""
+	$(MAKE) finetune-all-safe
+
 # Train with specific model
 # Usage: make train-model MODEL=qwen-7b
 train-model:
@@ -238,6 +288,27 @@ train-model:
 	@echo "Available models: qwen-7b, qwen-14b, qwen-1.5b, llama3-8b, mistral-7b, phi-3.5"
 ifdef MODEL
 	python scripts/training_wizard.py --model $(MODEL) --auto
+endif
+
+# Analyze training data (check for long sequences that may cause OOM)
+analyze-data:
+	@echo ""
+	@echo "============================================"
+	@echo "Analyzing Training Data"
+	@echo "============================================"
+	python scripts/preprocess_training_data.py --analyze
+
+# Preprocess training data to split long sequences
+# Usage: make preprocess-data MAX_TOKENS=1024
+preprocess-data:
+	@echo ""
+	@echo "============================================"
+	@echo "Preprocessing Training Data"
+	@echo "============================================"
+ifdef MAX_TOKENS
+	python scripts/preprocess_training_data.py --max-tokens $(MAX_TOKENS) --in-place
+else
+	python scripts/preprocess_training_data.py --auto --in-place
 endif
 
 # Show status (combines corpus + training stats)

@@ -642,6 +642,21 @@ def run_mlx_training(args) -> Path | None:
     print("\nTraining output:")
     print("-" * 40)
 
+    # Try to import metrics parser for real-time visualization
+    try:
+        scripts_dir = Path(__file__).parent.parent / "src"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        from gswa.training.metrics_parser import MLXMetricsParser, create_ascii_loss_graph
+        HAS_METRICS_PARSER = True
+    except ImportError:
+        HAS_METRICS_PARSER = False
+        MLXMetricsParser = None
+
+    # Create logs directory
+    logs_dir = output_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
     try:
         # Run training with real-time output
         process = subprocess.Popen(
@@ -652,19 +667,42 @@ def run_mlx_training(args) -> Path | None:
             bufsize=1,
         )
 
-        # Stream output
+        # Stream output with metrics parsing
         training_log = []
+        metrics_parser = MLXMetricsParser(str(logs_dir)) if HAS_METRICS_PARSER else None
+
+        print("\n" + "─" * 60)
         for line in process.stdout:
-            print(line, end='')
             training_log.append(line)
+
+            # Parse metrics if available
+            if metrics_parser:
+                metric = metrics_parser.parse_line(line)
+                if metric:
+                    # Show condensed progress
+                    metrics_parser.print_progress(total_iters=args.iters)
+                elif "Val loss" in line or "error" in line.lower():
+                    print(f"\n{line.strip()}")
+            else:
+                print(line, end='')
 
         process.wait()
 
         if process.returncode != 0:
             raise subprocess.CalledProcessError(process.returncode, cmd)
 
-        print("-" * 40)
+        print("\n" + "─" * 60)
         print("\nTraining complete!")
+
+        # Show metrics summary and ASCII graph
+        if metrics_parser:
+            metrics_parser.print_final_summary()
+            if metrics_parser.metrics:
+                print("\n" + "─" * 50)
+                print("Loss Curve (ASCII)")
+                print("─" * 50)
+                print(create_ascii_loss_graph(metrics_parser.metrics))
+            metrics_parser.close()
 
         # Save training log
         with open(output_dir / "training.log", 'w') as f:
@@ -690,14 +728,31 @@ def run_mlx_training(args) -> Path | None:
         print(f"  Modelfile: {output_dir}/Modelfile")
         print(f"  Total models in registry: {len(registry['models'])}")
 
+        # Generate visualization report
+        try:
+            from gswa.training.visualizer import generate_training_report
+            if logs_dir.exists():
+                reports_dir = output_dir / "reports"
+                reports_dir.mkdir(exist_ok=True)
+                report_path = generate_training_report(
+                    str(logs_dir),
+                    str(reports_dir),
+                    training_config,
+                )
+                print(f"  Report: {report_path}")
+        except Exception as e:
+            print(f"  (Visualization report skipped: {e})")
+
         print("\n" + "-" * 60)
         print("Next Steps")
         print("-" * 60)
-        print(f"\n  1. Create Ollama model:")
+        print(f"\n  1. View training report:")
+        print(f"     open {output_dir}/reports/report.html")
+        print(f"\n  2. Create Ollama model:")
         print(f"     ollama create gswa-gilles -f {output_dir}/Modelfile")
-        print(f"\n  2. Update .env:")
+        print(f"\n  3. Update .env:")
         print(f"     echo 'VLLM_MODEL_NAME=gswa-gilles' >> .env")
-        print(f"\n  3. Restart GSWA:")
+        print(f"\n  4. Restart GSWA:")
         print(f"     make run")
 
         return output_dir

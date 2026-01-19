@@ -1,121 +1,294 @@
 # GSWA Training Guide - Foolproof One-Click Tutorial
 
-## Quick Start (Solving Memory Issues)
-
-If you encounter `Insufficient Memory` or `OOM` errors, use this command:
+## Quick Start (Recommended)
 
 ```bash
-# One-click memory-safe training (RECOMMENDED)
+# One-click training with auto-configuration
+python -m gswa.train train --preprocess --auto-plan -y
+
+# Or use the Makefile shortcut
 make train-safe
 ```
 
 This command automatically:
-1. Parses your corpus files
-2. Prepares training data
-3. **Splits long text sequences**
-4. **Uses conservative memory settings**
-5. **Retries with reduced settings on OOM**
+1. Detects your hardware (Apple Silicon/CUDA)
+2. Selects optimal training parameters
+3. Preprocesses long sequences (no truncation!)
+4. Runs training with OOM fallback protection
+5. Generates visualizations and reports
 
 ---
 
-## Common Issues and Solutions
+## New Unified CLI
 
-### Issue 1: `Insufficient Memory` / `kIOGPUCommandBufferCallbackErrorOutOfMemory`
-
-**Cause**: Training data contains sequences that are too long for GPU memory.
-
-**Solutions**:
+The new `gswa.train` CLI provides all training functionality in one place:
 
 ```bash
-# Method 1: Use memory-safe mode (RECOMMENDED)
-make train-safe
+# Show hardware information
+python -m gswa.train info
 
-# Method 2: Manual preprocessing
-make analyze-data          # View data statistics
-make preprocess-data       # Auto-split long sequences
-make finetune-mlx-safe     # Memory-safe training
+# Preprocess data only
+python -m gswa.train preprocess --max-tokens 2048
 
-# Method 3: Specify max token length
-make preprocess-data MAX_TOKENS=1024
+# Run training planner
+python -m gswa.train plan --max-candidates 5
+
+# Full training with all features
+python -m gswa.train train --preprocess --auto-plan
+
+# Generate visualizations from a run
+python -m gswa.train visualize --run-dir runs/20240115-123456
+
+# List recent runs
+python -m gswa.train list
 ```
 
-### Issue 2: Training is too slow
+---
 
-**Solutions**:
-- Close other GPU-intensive apps (browsers, Photoshop, etc.)
-- Use a smaller model: `python scripts/finetune_mlx_mac.py --model phi3`
+## Memory Safety Features
 
-### Issue 3: Want higher quality training
+### Automatic OOM Fallback
 
-If your Mac has enough memory (32GB+), use more aggressive settings:
+If Metal OOM occurs during training, the system automatically:
+
+1. **First**: Reduces `eval_batch_size`
+2. **Then**: Reduces `batch_size`
+3. **Then**: Reduces `max_seq_length`
+4. **Finally**: Reduces `num_layers`
+
+All fallback decisions are logged with explicit reasons.
+
+### Data Preprocessing
+
+Long sequences are now intelligently split instead of truncated:
 
 ```bash
-# List available profiles
-python scripts/finetune_mlx_mac.py --list-profiles
+# Analyze data without modifying
+python -m gswa.train preprocess --analyze-only
 
-# Use a specific profile
-python scripts/finetune_mlx_mac.py --profile mac_m1_32gb
+# Preprocess with specific max tokens
+python -m gswa.train preprocess --max-tokens 1024 --strategy paragraph
+
+# Strategies available: auto, paragraph, sentence, token
+```
+
+**Statistics reported**:
+- Token distribution: min/median/p90/p95/p99/max
+- Truncation percentage before vs after
+- Chunks per original entry
+- Markdown report with full analysis
+
+---
+
+## Training Planner
+
+The planner finds optimal configuration through dry-runs:
+
+```bash
+python -m gswa.train plan \
+    --model mlx-community/Mistral-7B-Instruct-v0.2-4bit \
+    --max-candidates 5 \
+    --dry-run-steps 10
+```
+
+**Scoring formula**:
+- `score = throughput_score * stability_score * effective_batch_factor`
+- Rejects plans near OOM threshold (80% margin by default)
+- Deterministic with seed control
+
+---
+
+## Run Directory Structure
+
+Each training run creates a structured directory:
+
+```
+runs/<timestamp>/
+├── config/
+│   ├── run_config.json      # Full configuration
+│   └── hardware_info.json   # Hardware snapshot
+├── logs/
+│   ├── train_steps.jsonl    # Step-by-step metrics
+│   ├── eval_steps.jsonl     # Evaluation metrics
+│   └── events.jsonl         # OOM events, config changes
+├── plots/
+│   ├── loss.png             # Loss curves
+│   ├── throughput.png       # Tokens/sec
+│   ├── memory.png           # Peak memory
+│   └── length_distribution.png
+├── reports/
+│   └── report.html          # Interactive HTML report
+├── adapters/                 # LoRA adapters
+├── stats/
+│   └── preprocess_stats.json
+└── metadata.json
+```
+
+---
+
+## Configuration Files
+
+### Using YAML/JSON Configs
+
+```yaml
+# configs/my_run.yaml
+model_id: mlx-community/Mistral-7B-Instruct-v0.2-4bit
+batch_size: 2
+max_seq_length: 1536
+num_layers: 12
+iters: 500
+learning_rate: 1e-5
+lora_rank: 8
+enable_oom_fallback: true
+preprocess_enabled: true
+seed: 42
+```
+
+```bash
+python -m gswa.train train --config configs/my_run.yaml
+```
+
+### Reproducing a Run
+
+```bash
+# Use exact config from previous run
+python -m gswa.train train --config runs/20240115-123456/config/run_config.json
 ```
 
 ---
 
 ## Memory Configuration Reference
 
-| RAM | Profile | batch_size | max_seq_length | num_layers |
-|-----|---------|------------|----------------|------------|
-| 8GB | mac_m1_8gb | 1 | 512 | 4 |
-| 16GB | mac_m1_16gb | 1 | 1024 | 8 |
-| 32GB | mac_m1_32gb | 2 | 1536 | 12 |
-| 64GB | mac_m1_64gb | 4 | 2048 | 16 |
-| 128GB+ | mac_m1_128gb | 8 | 4096 | 24 |
+| RAM | Recommended Settings | Notes |
+|-----|---------------------|-------|
+| 8GB | batch=1, seq=512, layers=4 | Minimal, use --memory-safe |
+| 16GB | batch=1, seq=768-1024, layers=8 | Standard configuration |
+| 32GB | batch=2, seq=1536, layers=12 | Good balance |
+| 64GB | batch=4, seq=2048, layers=16 | Full capability |
+| 128GB+ | batch=8, seq=4096, layers=24 | Maximum settings |
 
 ---
 
-## Complete Training Workflow
+## Interpreting Logs and Plots
 
-### Step 1: Prepare Corpus
-```bash
-# Place PDF/DOCX files in:
-# data/corpus/raw/
+### Training Logs (JSONL)
 
-# Important files (higher weight):
-# data/corpus/raw/important_examples/
+```json
+{
+  "step": 100,
+  "timestamp": "2024-01-15T10:30:45",
+  "train_loss": 1.234,
+  "learning_rate": 1e-5,
+  "tokens_per_sec": 150.5,
+  "peak_memory_gb": 12.3,
+  "trained_tokens": 100000
+}
 ```
 
-### Step 2: Parse Corpus
+### Loss Plot
+- **Train loss** (blue): Should decrease smoothly
+- **Eval loss** (green): Should track train loss without diverging
+- **OOM markers** (red dashed): Show fallback events
+
+### Throughput Plot
+- Stable throughput indicates healthy training
+- Drops may indicate memory pressure
+
+### Memory Plot
+- Filled area shows peak memory usage
+- Should stay below available memory
+
+---
+
+## Common Issues and Solutions
+
+### Issue 1: `Insufficient Memory` / OOM
+
+```bash
+# Solution: Use auto-fallback (default) or memory-safe mode
+python -m gswa.train train --preprocess
+
+# Or manually specify conservative settings
+python -m gswa.train train \
+    --batch-size 1 \
+    --max-seq-length 768 \
+    --num-layers 4
+```
+
+### Issue 2: Long sequences being truncated
+
+```bash
+# Solution: Enable preprocessing
+python -m gswa.train train --preprocess
+
+# Or preprocess separately first
+python -m gswa.train preprocess --max-tokens 1024
+```
+
+### Issue 3: Noisy training loss
+
+```bash
+# Solution: Use gradient accumulation
+# Edit config or use planner which considers effective batch size
+python -m gswa.train plan --max-candidates 10
+```
+
+### Issue 4: Validation OOM (training works)
+
+The fallback system handles this automatically by reducing eval_batch_size first.
+
+---
+
+## Complete Workflow
+
+### 1. Prepare Corpus
+```bash
+# Place files in data/corpus/raw/
+# Priority files in data/corpus/raw/important_examples/
+```
+
+### 2. Parse and Prepare
 ```bash
 make parse-corpus
-```
-
-### Step 3: Prepare Training Data
-```bash
 make prepare-training
 ```
 
-### Step 4: Analyze Data (Optional but Recommended)
+### 3. Train with Full Pipeline
 ```bash
-make analyze-data
+python -m gswa.train train \
+    --preprocess \
+    --auto-plan \
+    --name my-experiment
 ```
 
-### Step 5: Preprocess Data (if long sequences exist)
+### 4. Review Results
 ```bash
-make preprocess-data
+# Open HTML report
+open runs/<your-run>/reports/report.html
+
+# Or regenerate visualizations
+python -m gswa.train visualize --run-dir runs/<your-run>
 ```
 
-### Step 6: Train
+### 5. Create Ollama Model
 ```bash
-make finetune-mlx-safe
+ollama create gswa-gilles -f runs/<your-run>/adapters/Modelfile
 ```
 
-### Step 7: Create Ollama Model
-```bash
-ollama create gswa-gilles -f models/gswa-mlx-*/Modelfile
-```
-
-### Step 8: Configure and Run
+### 6. Use the Model
 ```bash
 echo 'VLLM_MODEL_NAME=gswa-gilles' >> .env
 make run
+```
+
+---
+
+## Unit Tests
+
+Run tests to verify the training infrastructure:
+
+```bash
+pytest tests/test_training.py -v
 ```
 
 ---
@@ -124,53 +297,11 @@ make run
 
 | Command | Description |
 |---------|-------------|
-| `make train-safe` | Foolproof one-click training (RECOMMENDED) |
-| `make train-auto` | Auto training (no confirmation) |
-| `make train` | Interactive training wizard |
+| `python -m gswa.train info` | Show hardware information |
+| `python -m gswa.train preprocess` | Preprocess training data |
+| `python -m gswa.train plan` | Run training planner |
+| `python -m gswa.train train` | Run training |
+| `python -m gswa.train visualize` | Generate visualizations |
+| `python -m gswa.train list` | List recent runs |
+| `make train-safe` | Shortcut for safe training |
 | `make analyze-data` | Analyze training data |
-| `make preprocess-data` | Preprocess long sequences |
-| `make finetune-mlx-safe` | Memory-safe MLX training |
-| `make finetune-all-safe` | Full pipeline (memory-safe) |
-
----
-
-## Manual Parameters
-
-```bash
-python scripts/finetune_mlx_mac.py \
-    --model mistral \
-    --batch-size 1 \
-    --max-seq-length 1024 \
-    --num-layers 8 \
-    --iters 500 \
-    --memory-safe
-```
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--batch-size` | 4 | Batch size, reduce to save memory |
-| `--max-seq-length` | 1024 | Max sequence length, reduce to save memory |
-| `--num-layers` | 16 | LoRA layers, reduce to save memory |
-| `--iters` | 1000 | Training iterations |
-| `--memory-safe` | False | Enable memory-safe mode |
-| `--retry-on-oom` | True | Auto-retry on OOM |
-
----
-
-## Troubleshooting
-
-```bash
-# Check dependencies
-make check-mlx
-
-# View status
-make status
-
-# List models
-make models
-
-# Clean and restart
-make clean
-rm -rf data/training/mlx/
-make train-safe
-```

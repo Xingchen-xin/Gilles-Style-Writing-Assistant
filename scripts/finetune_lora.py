@@ -392,6 +392,158 @@ def create_model_registry(base_dir: str):
     return registry
 
 
+def generate_loss_curves(output_dir: Path, training_results: dict):
+    """Generate and save loss curve visualizations.
+
+    Creates:
+    - loss_curves.png: Training and validation loss over steps
+    - loss_curves_ascii.txt: ASCII version for terminal viewing
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib
+        matplotlib.use('Agg')  # Non-interactive backend
+    except ImportError:
+        # Fall back to ASCII if matplotlib not available
+        generate_ascii_loss_curve(output_dir, training_results)
+        return
+
+    loss_history = training_results.get("loss_history", [])
+    if not loss_history:
+        print("  No loss history available")
+        return
+
+    # Extract training and evaluation losses
+    train_steps = []
+    train_losses = []
+    eval_steps = []
+    eval_losses = []
+
+    for entry in loss_history:
+        if "loss" in entry and "step" in entry:
+            train_steps.append(entry["step"])
+            train_losses.append(entry["loss"])
+        if "eval_loss" in entry and "step" in entry:
+            eval_steps.append(entry["step"])
+            eval_losses.append(entry["eval_loss"])
+
+    if not train_losses:
+        print("  No training loss data found")
+        return
+
+    # Create figure with subplots
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Plot 1: Loss curves
+    ax1 = axes[0]
+    ax1.plot(train_steps, train_losses, 'b-', label='Training Loss', alpha=0.7)
+    if eval_losses:
+        ax1.plot(eval_steps, eval_losses, 'g-', label='Validation Loss', linewidth=2)
+    ax1.set_xlabel('Step')
+    ax1.set_ylabel('Loss')
+    ax1.set_title('Training and Validation Loss')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # Plot 2: Smoothed loss (moving average)
+    ax2 = axes[1]
+    window = min(10, len(train_losses) // 5) if len(train_losses) > 10 else 1
+    if window > 1:
+        smoothed = []
+        for i in range(len(train_losses)):
+            start = max(0, i - window + 1)
+            smoothed.append(sum(train_losses[start:i+1]) / (i - start + 1))
+        ax2.plot(train_steps, smoothed, 'b-', label=f'Training Loss (smoothed, window={window})')
+    else:
+        ax2.plot(train_steps, train_losses, 'b-', label='Training Loss')
+
+    if eval_losses:
+        ax2.plot(eval_steps, eval_losses, 'go-', label='Validation Loss', markersize=4)
+
+    # Add final metrics as text
+    final_train = training_results.get("train_loss", train_losses[-1] if train_losses else None)
+    final_valid = training_results.get("validation_loss")
+    final_test = training_results.get("test_loss")
+
+    text_lines = []
+    if final_train is not None:
+        text_lines.append(f"Final Train: {final_train:.4f}")
+    if final_valid is not None:
+        text_lines.append(f"Final Valid: {final_valid:.4f}")
+    if final_test is not None:
+        text_lines.append(f"Final Test: {final_test:.4f}")
+
+    if text_lines:
+        ax2.text(0.98, 0.98, '\n'.join(text_lines),
+                transform=ax2.transAxes, fontsize=10,
+                verticalalignment='top', horizontalalignment='right',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    ax2.set_xlabel('Step')
+    ax2.set_ylabel('Loss')
+    ax2.set_title('Smoothed Loss Curve')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_dir / "loss_curves.png", dpi=150, bbox_inches='tight')
+    plt.close()
+
+    # Also generate ASCII version
+    generate_ascii_loss_curve(output_dir, training_results)
+
+
+def generate_ascii_loss_curve(output_dir: Path, training_results: dict):
+    """Generate ASCII loss curve for terminal viewing."""
+    loss_history = training_results.get("loss_history", [])
+    train_losses = [e["loss"] for e in loss_history if "loss" in e]
+
+    if not train_losses:
+        return
+
+    # Simple ASCII graph
+    width = 60
+    height = 15
+
+    min_loss = min(train_losses)
+    max_loss = max(train_losses)
+    loss_range = max_loss - min_loss if max_loss != min_loss else 1
+
+    lines = []
+    lines.append(f"Loss Curve (steps: {len(train_losses)}, final: {train_losses[-1]:.4f})")
+    lines.append(f"Range: {min_loss:.4f} - {max_loss:.4f}")
+    lines.append("=" * width)
+
+    # Create graph grid
+    graph = [[' ' for _ in range(width)] for _ in range(height)]
+
+    # Plot points
+    for i, loss in enumerate(train_losses):
+        x = int(i / len(train_losses) * (width - 1))
+        y = int((1 - (loss - min_loss) / loss_range) * (height - 1))
+        y = max(0, min(height - 1, y))
+        graph[y][x] = '█'
+
+    # Add axis labels
+    for row in graph:
+        lines.append('│' + ''.join(row) + '│')
+    lines.append('└' + '─' * width + '┘')
+    lines.append(f" Step 0{' ' * (width - 12)}Step {len(train_losses)}")
+
+    # Final metrics
+    lines.append("")
+    lines.append("Final Metrics:")
+    if training_results.get("train_loss"):
+        lines.append(f"  Train Loss: {training_results['train_loss']:.4f}")
+    if training_results.get("validation_loss"):
+        lines.append(f"  Valid Loss: {training_results['validation_loss']:.4f}")
+    if training_results.get("test_loss"):
+        lines.append(f"  Test Loss:  {training_results['test_loss']:.4f}")
+
+    with open(output_dir / "loss_curves_ascii.txt", 'w') as f:
+        f.write('\n'.join(lines))
+
+
 def train_with_transformers(args):
     """Train using Hugging Face Transformers + PEFT."""
     import torch
@@ -515,13 +667,23 @@ def train_with_transformers(args):
         remove_columns=["text"],
     )
 
-    # Split into train/eval
-    split = tokenized_dataset.train_test_split(test_size=0.1, seed=42)
-    train_dataset = split["train"]
-    eval_dataset = split["test"]
+    # Split into train/valid/test using ML best practices (80/10/10)
+    # Step 1: Split off test set (10%)
+    train_valid_test = tokenized_dataset.train_test_split(test_size=0.10, seed=42)
+    test_dataset = train_valid_test["test"]
 
-    print(f"  Training samples: {len(train_dataset)}")
-    print(f"  Evaluation samples: {len(eval_dataset)}")
+    # Step 2: Split remaining into train (80%) and validation (10%)
+    # 10% of remaining 90% = 11.11% to get 10% of total
+    train_valid = train_valid_test["train"].train_test_split(test_size=0.111, seed=42)
+    train_dataset = train_valid["train"]
+    eval_dataset = train_valid["test"]
+
+    total = len(train_dataset) + len(eval_dataset) + len(test_dataset)
+    print(f"\n  Data Split (seed=42):")
+    print(f"    Train: {len(train_dataset):,} samples ({len(train_dataset)/total*100:.0f}%)")
+    print(f"    Valid: {len(eval_dataset):,} samples ({len(eval_dataset)/total*100:.0f}%)")
+    print(f"    Test:  {len(test_dataset):,} samples ({len(test_dataset)/total*100:.0f}%)")
+    print(f"    Total: {total:,} samples")
 
     # Create versioned output directory
     model_short = args.base_model.split("/")[-1].split("-")[0]
@@ -591,20 +753,55 @@ def train_with_transformers(args):
     print("-" * 40)
 
     try:
-        trainer.train()
+        train_result = trainer.train()
 
         print("-" * 40)
         print("\nTraining complete!")
+
+        # Evaluate on validation set
+        print("\n" + "-" * 60)
+        print("Evaluating on Validation Set")
+        print("-" * 60)
+        eval_results = trainer.evaluate()
+        print(f"  Validation Loss: {eval_results.get('eval_loss', 'N/A'):.4f}")
+
+        # Evaluate on test set (held out)
+        print("\n" + "-" * 60)
+        print("Evaluating on Test Set (held out)")
+        print("-" * 60)
+        test_results = trainer.evaluate(test_dataset)
+        print(f"  Test Loss: {test_results.get('eval_loss', 'N/A'):.4f}")
 
         # Save model
         print(f"\nSaving model to: {output_dir}")
         model.save_pretrained(output_dir)
         tokenizer.save_pretrained(output_dir)
 
+        # Save training results with loss curves
+        training_results = {
+            "train_loss": train_result.training_loss,
+            "train_runtime": train_result.metrics.get("train_runtime", 0),
+            "train_samples_per_second": train_result.metrics.get("train_samples_per_second", 0),
+            "validation_loss": eval_results.get("eval_loss"),
+            "test_loss": test_results.get("eval_loss"),
+            "total_steps": train_result.global_step,
+            "epochs": args.epochs,
+        }
+
+        # Save training history for loss curves
+        if hasattr(trainer.state, 'log_history') and trainer.state.log_history:
+            training_results["loss_history"] = trainer.state.log_history
+
+        with open(output_dir / "training_results.json", 'w') as f:
+            json.dump(training_results, f, indent=2)
+
         # Update metadata
         update_model_metadata(output_dir, {
             "status": "completed",
             "completed_at": datetime.now().isoformat(),
+            "final_train_loss": train_result.training_loss,
+            "final_valid_loss": eval_results.get("eval_loss"),
+            "final_test_loss": test_results.get("eval_loss"),
         })
 
         # Update registry
@@ -614,7 +811,20 @@ def train_with_transformers(args):
         print("Training Summary")
         print("=" * 60)
         print(f"  Model saved to: {output_dir}")
+        print(f"  Final Train Loss: {train_result.training_loss:.4f}")
+        print(f"  Final Valid Loss: {eval_results.get('eval_loss', 'N/A'):.4f}")
+        print(f"  Final Test Loss:  {test_results.get('eval_loss', 'N/A'):.4f}")
         print(f"  Total models in registry: {len(registry['models'])}")
+
+        # Generate loss curve visualization
+        print("\n" + "-" * 60)
+        print("Generating Loss Curves")
+        print("-" * 60)
+        try:
+            generate_loss_curves(output_dir, training_results)
+            print(f"  Loss curves saved to: {output_dir}/loss_curves.png")
+        except Exception as e:
+            print(f"  Warning: Could not generate loss curves: {e}")
 
         print("\n" + "-" * 60)
         print("Next Steps")
@@ -626,6 +836,9 @@ def train_with_transformers(args):
         print(f"    python scripts/merge_lora.py --adapter {output_dir}")
         print("\n  Option 3: Use with vLLM:")
         print(f"    Configure LORA_ADAPTER_PATH={output_dir} in .env")
+        print("\n  View training results:")
+        print(f"    cat {output_dir}/training_results.json")
+        print(f"    open {output_dir}/loss_curves.png")
 
         return str(output_dir)
 

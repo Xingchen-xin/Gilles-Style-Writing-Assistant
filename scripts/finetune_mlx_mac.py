@@ -443,18 +443,27 @@ def prepare_mlx_data(input_file: str, output_dir: str) -> str:
 
     print(f"  Loaded {len(data)} entries from {input_file}")
 
-    # Split into train/valid/test
+    # Split into train/valid/test using ML best practices (80/10/10)
     import random
     random.seed(42)
     random.shuffle(data)
 
     n = len(data)
-    train_end = int(n * 0.9)
-    valid_end = int(n * 0.95)
+    # Standard ML split: 80% train, 10% validation, 10% test
+    train_ratio = 0.80
+    valid_ratio = 0.10
+    # test_ratio = 0.10 (remaining)
+
+    train_end = int(n * train_ratio)
+    valid_end = int(n * (train_ratio + valid_ratio))
 
     train_data = data[:train_end]
     valid_data = data[train_end:valid_end]
     test_data = data[valid_end:]
+
+    print(f"  Data split: train={len(train_data)} ({train_ratio*100:.0f}%), "
+          f"valid={len(valid_data)} ({valid_ratio*100:.0f}%), "
+          f"test={len(test_data)} ({(1-train_ratio-valid_ratio)*100:.0f}%)")
 
     # Format for MLX (expects "text" field)
     def format_for_mlx(item):

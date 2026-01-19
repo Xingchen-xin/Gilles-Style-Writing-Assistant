@@ -538,11 +538,46 @@ def run_lora_training(
     return False
 
 
-def prepare_mlx_data(input_file: str, output_dir: Path):
-    """Prepare data in MLX format (train/valid/test splits)."""
+# Standard ML data split ratios (configurable)
+DEFAULT_TRAIN_RATIO = 0.80  # 80% for training
+DEFAULT_VALID_RATIO = 0.10  # 10% for validation
+DEFAULT_TEST_RATIO = 0.10   # 10% for testing
+
+
+def prepare_mlx_data(
+    input_file: str,
+    output_dir: Path,
+    train_ratio: float = DEFAULT_TRAIN_RATIO,
+    valid_ratio: float = DEFAULT_VALID_RATIO,
+    test_ratio: float = DEFAULT_TEST_RATIO,
+    seed: int = 42,
+):
+    """Prepare data in MLX format (train/valid/test splits).
+
+    Standard ML best practice: 80/10/10 split for train/valid/test.
+    - Training set: Used to train the model
+    - Validation set: Used for hyperparameter tuning and early stopping
+    - Test set: Held out for final evaluation (never seen during training)
+
+    Args:
+        input_file: Path to input JSONL file
+        output_dir: Output directory for split files
+        train_ratio: Fraction for training (default 0.80)
+        valid_ratio: Fraction for validation (default 0.10)
+        test_ratio: Fraction for testing (default 0.10)
+        seed: Random seed for reproducibility
+    """
     import random
 
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Validate ratios
+    total = train_ratio + valid_ratio + test_ratio
+    if abs(total - 1.0) > 0.001:
+        print(f"  Warning: Split ratios sum to {total:.2f}, normalizing...")
+        train_ratio /= total
+        valid_ratio /= total
+        test_ratio /= total
 
     # Load all data
     data = []
@@ -551,14 +586,14 @@ def prepare_mlx_data(input_file: str, output_dir: Path):
             if line.strip():
                 data.append(json.loads(line))
 
-    # Shuffle
-    random.seed(42)
+    # Shuffle with seed for reproducibility
+    random.seed(seed)
     random.shuffle(data)
 
-    # Split
+    # Split according to ratios
     n = len(data)
-    train_end = int(n * 0.9)
-    valid_end = int(n * 0.95)
+    train_end = int(n * train_ratio)
+    valid_end = int(n * (train_ratio + valid_ratio))
 
     splits = {
         "train": data[:train_end],
@@ -576,14 +611,35 @@ def prepare_mlx_data(input_file: str, output_dir: Path):
             return {"text": text}
         return entry
 
-    # Save
+    # Save splits
     for name, entries in splits.items():
         with open(output_dir / f"{name}.jsonl", 'w') as f:
             for entry in entries:
                 formatted = format_entry(entry)
                 f.write(json.dumps(formatted, ensure_ascii=False) + '\n')
 
-    print(f"  Prepared data: train={len(splits['train'])}, valid={len(splits['valid'])}, test={len(splits['test'])}")
+    # Print split statistics
+    print(f"\n  Data Split (seed={seed}):")
+    print(f"    Train: {len(splits['train']):,} samples ({train_ratio*100:.0f}%)")
+    print(f"    Valid: {len(splits['valid']):,} samples ({valid_ratio*100:.0f}%)")
+    print(f"    Test:  {len(splits['test']):,} samples ({test_ratio*100:.0f}%)")
+    print(f"    Total: {n:,} samples")
+
+    # Save split info for reproducibility
+    split_info = {
+        "seed": seed,
+        "total_samples": n,
+        "train_samples": len(splits['train']),
+        "valid_samples": len(splits['valid']),
+        "test_samples": len(splits['test']),
+        "train_ratio": train_ratio,
+        "valid_ratio": valid_ratio,
+        "test_ratio": test_ratio,
+    }
+    with open(output_dir / "split_info.json", 'w') as f:
+        json.dump(split_info, f, indent=2)
+
+    return str(output_dir), split_info
 
 
 def cmd_visualize(args):

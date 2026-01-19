@@ -38,8 +38,8 @@ RUNS_DIR = PROJECT_ROOT / "runs"
 def print_banner():
     """Print GSWA banner."""
     print("\n" + "=" * 60)
-    print("  GSWA MLX Fine-tuning Pipeline")
-    print("  Gilles-Style Writing Assistant")
+    print("  GSWA Fine-tuning Pipeline")
+    print("  Cross-Platform: Apple Silicon (MLX) + NVIDIA (CUDA)")
     print("=" * 60)
 
 
@@ -418,35 +418,124 @@ def run_lora_training(
     run_manager: RunManager,
     args,
 ) -> bool:
-    """Run LoRA training for CUDA."""
+    """Run LoRA training for CUDA with OOM fallback and visualization."""
+    from gswa.training.cuda_trainer import CUDATrainer, CUDATrainingConfig
+
+    # Create CUDA training config from RunConfig
+    cuda_config = CUDATrainingConfig(
+        model_id=config.model_id,
+        training_data=config.training_data,
+        output_dir=str(run_dir.parent),
+        batch_size=config.batch_size,
+        eval_batch_size=config.eval_batch_size,
+        max_seq_length=config.max_seq_length,
+        learning_rate=config.learning_rate,
+        lora_r=config.lora_rank,
+        lora_alpha=config.lora_alpha,
+        gradient_accumulation_steps=config.grad_accum_steps,
+        preprocess_enabled=False,  # Already preprocessed in cmd_train
+        enable_oom_fallback=config.enable_oom_fallback,
+        run_name=run_dir.name,
+    )
+
+    # Create trainer and run
+    trainer = CUDATrainer(cuda_config)
+
+    print(f"\n  Model: {cuda_config.model_id}")
+    print(f"  Batch size: {cuda_config.batch_size}")
+    print(f"  Sequence length: {cuda_config.max_seq_length}")
+    print(f"  Quantization: {cuda_config.quantize}")
+    print(f"  OOM fallback: {'enabled' if cuda_config.enable_oom_fallback else 'disabled'}")
+    print("-" * 40)
+
+    # Run training subprocess directly for simplicity
     script = SCRIPTS_DIR / "finetune_lora.py"
 
     if not script.exists():
         print(f"Error: Training script not found: {script}")
         return False
 
-    cmd = [
-        sys.executable, str(script),
-        "--model", config.model_id,
-        "--training-data", config.training_data,
-        "--output-dir", str(run_dir / "adapters"),
-        "--batch-size", str(config.batch_size),
-        "--max-length", str(config.max_seq_length),
-        "--learning-rate", str(config.learning_rate),
-        "--lora-r", str(config.lora_rank),
-        "--lora-alpha", str(config.lora_alpha),
-        "--gradient-accumulation-steps", str(config.grad_accum_steps),
-    ]
+    max_retries = 3 if config.enable_oom_fallback else 1
+    current_config = cuda_config
 
-    print(f"  Command: {' '.join(cmd[:6])}...")
-    print("-" * 40)
+    for attempt in range(max_retries):
+        cmd = [
+            sys.executable, str(script),
+            "--base-model", current_config.model_id,
+            "--training-data", current_config.training_data,
+            "--output-dir", str(run_dir / "adapters"),
+            "--batch-size", str(current_config.batch_size),
+            "--max-length", str(current_config.max_seq_length),
+            "--learning-rate", str(current_config.learning_rate),
+            "--lora-r", str(current_config.lora_r),
+            "--lora-alpha", str(current_config.lora_alpha),
+            "--gradient-accumulation-steps", str(current_config.gradient_accumulation_steps),
+            "--quantize", current_config.quantize,
+        ]
 
-    try:
-        result = subprocess.run(cmd)
-        return result.returncode == 0
-    except KeyboardInterrupt:
-        print("\n\nTraining interrupted by user.")
-        return False
+        print(f"\n  Attempt {attempt + 1}/{max_retries}")
+        print(f"  batch_size={current_config.batch_size}, "
+              f"seq_len={current_config.max_seq_length}, "
+              f"grad_accum={current_config.gradient_accumulation_steps}")
+
+        # Run with output logging
+        log_file = run_dir / "logs" / "training_output.log"
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            with open(log_file, 'w') as log:
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+
+                # Stream output
+                for line in process.stdout:
+                    print(line, end='')
+                    log.write(line)
+
+                process.wait()
+
+            if process.returncode == 0:
+                return True
+
+            # Check for OOM
+            with open(log_file, 'r') as f:
+                output = f.read().lower()
+
+            if "cuda out of memory" in output or "oom" in output:
+                if attempt < max_retries - 1:
+                    print(f"\n  CUDA OOM detected, applying fallback...")
+
+                    # Apply fallback - halve batch size or reduce sequence length
+                    if current_config.batch_size > 1:
+                        current_config.batch_size = max(1, current_config.batch_size // 2)
+                        current_config.gradient_accumulation_steps *= 2
+                    elif current_config.max_seq_length > 512:
+                        current_config.max_seq_length = int(current_config.max_seq_length * 0.75)
+
+                    run_manager.log_event("oom_fallback", {
+                        "attempt": attempt + 1,
+                        "new_batch_size": current_config.batch_size,
+                        "new_seq_length": current_config.max_seq_length,
+                    })
+                    continue
+            else:
+                print(f"\n  Training failed with exit code {process.returncode}")
+                break
+
+        except KeyboardInterrupt:
+            print("\n\nTraining interrupted by user.")
+            return False
+
+        except Exception as e:
+            print(f"\n  Error: {e}")
+            break
+
+    return False
 
 
 def prepare_mlx_data(input_file: str, output_dir: Path):

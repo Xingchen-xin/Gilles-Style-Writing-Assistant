@@ -2,16 +2,31 @@
 
 ## Quick Start (Recommended)
 
+### Mac (Apple Silicon)
+
 ```bash
 # One-click training with auto-configuration
-python -m gswa.train train --preprocess --auto-plan -y
-
-# Or use the Makefile shortcut
 make train-safe
+
+# Or use the CLI directly
+python -m gswa.train train --preprocess --auto-plan -y
 ```
 
-This command automatically:
-1. Detects your hardware (Apple Silicon/CUDA)
+### Linux (NVIDIA GPU)
+
+```bash
+# One-click Linux training with auto-configuration
+make train-linux
+
+# Or memory-safe mode with OOM fallback (RECOMMENDED)
+make train-linux-safe
+
+# Or use the CLI directly
+python -m gswa.train train --preprocess -y
+```
+
+Both commands automatically:
+1. Detects your hardware (Apple Silicon/NVIDIA CUDA)
 2. Selects optimal training parameters
 3. Preprocesses long sequences (no truncation!)
 4. Runs training with OOM fallback protection
@@ -19,7 +34,93 @@ This command automatically:
 
 ---
 
-## New Unified CLI
+## Linux Training Guide (傻瓜式一键Linux训练)
+
+### Prerequisites
+
+```bash
+# Install CUDA training dependencies
+pip install torch transformers peft datasets accelerate bitsandbytes
+
+# Verify CUDA is available
+python -c "import torch; print(f'CUDA: {torch.cuda.is_available()}')"
+```
+
+### One-Click Training
+
+```bash
+# Simplest method - fully automatic
+make train-linux
+
+# This does everything:
+# 1. Parses your corpus files (PDF/DOCX/TXT)
+# 2. Prepares training data
+# 3. Detects your GPU and VRAM
+# 4. Selects optimal parameters
+# 5. Preprocesses long sequences
+# 6. Trains with progress display
+# 7. Generates visualizations
+```
+
+### Memory-Safe Mode (Recommended for OOM)
+
+```bash
+# Memory-safe training with automatic fallback
+make train-linux-safe
+
+# This mode will:
+# - Use conservative initial settings
+# - Automatically retry with reduced settings on OOM
+# - Log all fallback decisions
+```
+
+### NVIDIA GPU Memory Reference
+
+| GPU VRAM | Recommended Settings | Example GPUs |
+|----------|---------------------|--------------|
+| 4GB | batch=1, seq=512, 4bit quant | GTX 1650 |
+| 8GB | batch=1, seq=1024, 4bit quant | RTX 3060, RTX 4060 |
+| 16GB | batch=2, seq=1536, 4bit quant | RTX 4080, A4000 |
+| 24GB | batch=4, seq=2048, 4bit quant | RTX 3090, RTX 4090, A5000 |
+| 48GB | batch=8, seq=2048, no quant | A6000, A40 |
+
+### OOM Fallback Strategy (CUDA)
+
+If CUDA OOM occurs during training, the system automatically:
+
+1. **First**: Halves `batch_size`, doubles `gradient_accumulation`
+2. **Then**: Halves `batch_size` again if possible
+3. **Then**: Reduces `max_seq_length` by 25%
+4. **Finally**: Doubles `gradient_accumulation` further
+
+All fallback decisions are logged in `logs/events.jsonl`.
+
+### Manual Configuration
+
+```bash
+# Train with specific settings
+python -m gswa.train train \
+    --model mistralai/Mistral-7B-Instruct-v0.3 \
+    --batch-size 2 \
+    --max-seq-length 1024 \
+    --preprocess \
+    -y
+```
+
+### Supported Models for Linux
+
+| Model | VRAM Required | Quality |
+|-------|--------------|---------|
+| `Qwen/Qwen2.5-1.5B-Instruct` | 4GB | Basic |
+| `microsoft/Phi-3.5-mini-instruct` | 8GB | Good |
+| `Qwen/Qwen2.5-7B-Instruct` | 16GB | Very Good |
+| `mistralai/Mistral-7B-Instruct-v0.3` | 16GB | Very Good |
+| `Qwen/Qwen2.5-14B-Instruct` | 24GB | Excellent |
+| `mistralai/Mistral-Large-Instruct-2407` | 48GB | Best |
+
+---
+
+## Unified CLI
 
 The new `gswa.train` CLI provides all training functionality in one place:
 
@@ -368,6 +469,8 @@ pytest tests/test_training.py -v
 
 ## Command Reference
 
+### CLI Commands
+
 | Command | Description |
 |---------|-------------|
 | `python -m gswa.train info` | Show hardware information |
@@ -376,5 +479,32 @@ pytest tests/test_training.py -v
 | `python -m gswa.train train` | Run training |
 | `python -m gswa.train visualize` | Generate visualizations |
 | `python -m gswa.train list` | List recent runs |
-| `make train-safe` | Shortcut for safe training |
-| `make analyze-data` | Analyze training data |
+
+### Mac Makefile Commands
+
+| Command | Description |
+|---------|-------------|
+| `make train-safe` | Memory-safe Mac training (RECOMMENDED) |
+| `make finetune-mlx` | MLX training (auto-detect settings) |
+| `make finetune-mlx-safe` | MLX with memory-safe mode |
+| `make finetune-all-safe` | Full pipeline with safe mode |
+
+### Linux Makefile Commands
+
+| Command | Description |
+|---------|-------------|
+| `make train-linux` | One-click Linux/CUDA training |
+| `make train-linux-safe` | Memory-safe Linux training (RECOMMENDED) |
+| `make train-linux-full` | Full pipeline with planner |
+| `make train-info` | Show hardware info and recommendations |
+| `make finetune-lora` | LoRA training (auto-detect settings) |
+| `make check-lora` | Check LoRA dependencies |
+
+### Utility Commands
+
+| Command | Description |
+|---------|-------------|
+| `make analyze-data` | Analyze training data for long sequences |
+| `make preprocess-data` | Preprocess data to split long sequences |
+| `make prepare-training` | Prepare training data from corpus |
+| `make parse-corpus` | Parse corpus files (PDF/DOCX/TXT) |

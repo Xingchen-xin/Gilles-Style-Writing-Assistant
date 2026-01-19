@@ -169,9 +169,61 @@ python -m gswa.train train --config runs/20240115-123456/config/run_config.json
 
 ---
 
+## Real-time Training Visualization
+
+### During Training
+
+Training now shows real-time metrics:
+
+```
+──────────────────────────────────────────────────────────────
+[ 25.0%] Step   250: Loss=1.8234 | 456.7 tok/s | 12.3GB
+```
+
+When training completes, you'll see:
+- **Metrics Summary**: Final/min/mean loss, throughput stats
+- **ASCII Loss Curve**: Terminal-friendly loss visualization
+
+### Standalone Visualization Script
+
+Use the visualization script for detailed analysis:
+
+```bash
+# Visualize latest run
+python scripts/visualize_training.py --latest
+
+# Watch training in real-time
+python scripts/visualize_training.py --run-dir runs/xxx --watch
+
+# Show ASCII loss graph in terminal
+python scripts/visualize_training.py --run-dir runs/xxx --ascii
+
+# Generate specific plots
+python scripts/visualize_training.py --run-dir runs/xxx --plots loss,throughput
+```
+
+### Generated Reports
+
+After training, open the HTML report:
+
+```bash
+open models/gswa-mlx-xxx/reports/report.html
+```
+
+The report includes:
+- **Loss curves** with smoothing
+- **Throughput** over time
+- **Memory usage** profile
+- **Configuration** summary
+- **Training statistics**
+
+---
+
 ## Interpreting Logs and Plots
 
 ### Training Logs (JSONL)
+
+Structured logs are saved in `logs/train_steps.jsonl`:
 
 ```json
 {
@@ -189,14 +241,35 @@ python -m gswa.train train --config runs/20240115-123456/config/run_config.json
 - **Train loss** (blue): Should decrease smoothly
 - **Eval loss** (green): Should track train loss without diverging
 - **OOM markers** (red dashed): Show fallback events
+- **Smoothed line**: Moving average for clearer trend
 
 ### Throughput Plot
 - Stable throughput indicates healthy training
-- Drops may indicate memory pressure
+- Drops may indicate memory pressure or batch size changes
 
 ### Memory Plot
 - Filled area shows peak memory usage
 - Should stay below available memory
+- Spikes may trigger OOM fallback
+
+### ASCII Loss Graph (Terminal)
+
+When matplotlib is not available, you get an ASCII graph:
+
+```
+Loss: 1.234 - 2.567
+┌────────────────────────────────┐
+│ ████                           │
+│ █████                          │
+│ ██████                         │
+│ ████████                       │
+│ ██████████                     │
+│ █████████████                  │
+│ ████████████████               │
+│ ██████████████████████████████ │
+└────────────────────────────────┘
+ Step 0                    Step 500
+```
 
 ---
 

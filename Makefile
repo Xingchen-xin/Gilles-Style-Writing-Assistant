@@ -1,4 +1,4 @@
-.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup-mac setup-ollama prepare-training finetune-lora finetune-mlx finetune-mlx-safe finetune-all finetune-all-safe finetune-smart list-docs training-stats check-deps check-mlx check-lora corpus corpus-add corpus-guide corpus-validate train train-auto train-safe train-model status models analyze-style style-show ai-check humanize analyze-data preprocess-data
+.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup-mac setup-ollama prepare-training finetune-lora finetune-mlx finetune-mlx-safe finetune-all finetune-all-safe finetune-smart list-docs training-stats check-deps check-mlx check-lora corpus corpus-add corpus-guide corpus-validate train train-auto train-safe train-model status models analyze-style style-show ai-check humanize analyze-data preprocess-data train-linux train-linux-safe train-linux-full train-info
 
 # Default target
 help:
@@ -57,6 +57,11 @@ help:
 	@echo "  training-stats    - Show training data statistics"
 	@echo "  check-mlx         - Check MLX dependencies (Mac)"
 	@echo "  check-lora        - Check LoRA dependencies (Linux)"
+	@echo ""
+	@echo "  === Linux One-Click Training ==="
+	@echo "  train-linux       - One-click Linux/CUDA training (auto-config)"
+	@echo "  train-linux-safe  - Linux training with OOM fallback (RECOMMENDED)"
+	@echo "  train-info        - Show hardware info and recommendations"
 	@echo ""
 	@echo "  === Style Analysis & AI Detection ==="
 	@echo "  analyze-style     - Analyze author style from corpus"
@@ -393,3 +398,65 @@ print(f\"Burstiness: {before.burstiness:.3f} -> {after.burstiness:.3f}\"); \
 print(f\"{'='*50}\"); \
 print(f\"\nHUMANIZED TEXT:\n\"); \
 print(result)"
+
+# ==================
+# Linux One-Click Training
+# ==================
+
+# Show hardware info and training recommendations
+train-info:
+	@echo ""
+	@echo "============================================"
+	@echo "GSWA Hardware Detection & Recommendations"
+	@echo "============================================"
+	python -m gswa.train info
+
+# One-click Linux/CUDA training with auto-configuration
+# 傻瓜式一键Linux训练
+train-linux: parse-corpus prepare-training
+	@echo ""
+	@echo "============================================"
+	@echo "GSWA One-Click Linux/CUDA Training"
+	@echo "Linux傻瓜式一键训练"
+	@echo "============================================"
+	@echo ""
+	@echo "This will automatically:"
+	@echo "  1. Detect your NVIDIA GPU and VRAM"
+	@echo "  2. Select optimal training parameters"
+	@echo "  3. Preprocess long sequences"
+	@echo "  4. Train with progress visualization"
+	@echo "  5. Generate training reports"
+	@echo ""
+	python -m gswa.train train --preprocess -y
+
+# Memory-safe Linux training with OOM fallback (RECOMMENDED)
+# 内存安全Linux训练（推荐）
+train-linux-safe: parse-corpus prepare-training
+	@echo ""
+	@echo "============================================"
+	@echo "GSWA Memory-Safe Linux Training"
+	@echo "Linux内存安全训练模式"
+	@echo "============================================"
+	@echo ""
+	@echo "This mode will:"
+	@echo "  1. Detect hardware and use conservative settings"
+	@echo "  2. Preprocess long sequences (no truncation)"
+	@echo "  3. Automatically retry with reduced settings on OOM"
+	@echo "  4. Generate visualizations and reports"
+	@echo ""
+	python -m gswa.train train --preprocess -y
+
+# Full Linux training pipeline with planner
+train-linux-full: parse-corpus prepare-training
+	@echo ""
+	@echo "============================================"
+	@echo "GSWA Full Linux Training Pipeline"
+	@echo "============================================"
+	python -m gswa.train train --preprocess --auto-plan -y
+	@echo ""
+	@echo "============================================"
+	@echo "Training Complete!"
+	@echo "============================================"
+	@echo ""
+	@echo "Check runs/ directory for outputs."
+	@echo "View report: open runs/<run-id>/reports/report.html"

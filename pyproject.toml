@@ -24,6 +24,13 @@ similarity = [
     "faiss-cpu>=1.7.0",
     "numpy>=1.24.0",
 ]
+train = [
+    "transformers>=4.40.0",
+    "peft>=0.10.0",
+    "datasets>=2.18.0",
+    "accelerate>=0.28.0",
+    "bitsandbytes>=0.43.0",
+]
 
 [build-system]
 requires = ["setuptools>=61.0"]

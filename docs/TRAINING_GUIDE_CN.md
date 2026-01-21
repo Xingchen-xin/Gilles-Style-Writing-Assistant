@@ -1,5 +1,62 @@
 # GSWA 训练指南 - 傻瓜式一键教程
 
+## 环境配置（首先阅读！）
+
+### Linux 服务器（无 sudo 权限）
+
+在服务器上训练模型前，请先配置好环境：
+
+```bash
+# 一键安装（推荐）
+make setup-cuda-auto    # 全自动安装，支持 CUDA
+
+# 安装完成后激活环境
+micromamba activate gswa
+
+# 验证 CUDA 可用
+python -c "import torch; print('CUDA:', torch.cuda.is_available())"
+```
+
+### 常见问题：`_ctypes` 模块缺失
+
+如果看到以下错误：
+```
+ModuleNotFoundError: No module named '_ctypes'
+```
+
+**这是什么问题？**
+- pyenv 编译的 Python 缺少 `libffi` 库支持
+- 服务器没有 sudo 权限，无法安装 `libffi-devel`
+
+**怎么解决？**
+```bash
+# 使用 micromamba（自带完整 Python，不需要系统库）
+curl -L micro.mamba.pm/install.sh | bash
+source ~/.bashrc
+
+# 创建环境
+micromamba create -n gswa python=3.11 -y
+micromamba activate gswa
+
+# 安装 PyTorch（根据你的 CUDA 版本选择）
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+
+# 安装项目
+pip install -e ".[dev,similarity]" pymupdf
+```
+
+### Mac 用户
+
+Mac 用户可以直接使用一键安装：
+```bash
+make setup      # 自动检测并配置环境
+source venv/bin/activate
+```
+
+详细安装指南：[INSTALL.md](INSTALL.md)
+
+---
+
 ## 快速开始（解决内存不足问题）
 
 如果你遇到了 `Insufficient Memory` 或 `OOM` 错误，请使用以下命令：

@@ -1,76 +1,64 @@
-.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup-mac setup-ollama prepare-training finetune-lora finetune-mlx finetune-mlx-safe finetune-all finetune-all-safe finetune-smart list-docs training-stats check-deps check-mlx check-lora corpus corpus-add corpus-guide corpus-validate train train-auto train-safe train-model status models analyze-style style-show ai-check humanize analyze-data preprocess-data train-linux train-linux-safe train-linux-full train-info
+.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup setup-auto setup-mac setup-ollama prepare-training finetune-lora finetune-mlx finetune-mlx-safe finetune-all finetune-all-safe finetune-smart list-docs training-stats check-deps check-mlx check-lora corpus corpus-add corpus-guide corpus-validate train train-auto train-safe train-model status models analyze-style style-show ai-check humanize analyze-data preprocess-data train-linux train-linux-safe train-linux-full train-info
 
 # Default target
 help:
 	@echo "GSWA - Gilles-Style Writing Assistant"
 	@echo ""
-	@echo "Available targets:"
+	@echo "=== Quick Start (傻瓜式一键操作) ==="
 	@echo ""
-	@echo "  === Installation ==="
-	@echo "  install        - Install core dependencies"
-	@echo "  dev            - Install development dependencies"
-	@echo "  install-train  - Install training dependencies (LoRA)"
+	@echo "  1. Setup:    make setup-cuda-auto  (Linux GPU) or make setup-auto (Mac)"
+	@echo "  2. Train:    make finetune-smart   (auto-detect platform & hardware)"
+	@echo "  3. Run:      make run              (start server at localhost:8080)"
 	@echo ""
-	@echo "  === Mac Setup (Apple Silicon) ==="
-	@echo "  setup-mac      - Complete Mac setup with Ollama"
-	@echo "  setup-ollama   - Install and configure Ollama"
+	@echo "=== All Commands ==="
 	@echo ""
-	@echo "  === Linux Setup (NVIDIA GPU) ==="
-	@echo "  start-vllm     - Start vLLM server"
+	@echo "  Setup:"
+	@echo "    setup-auto       Automatic setup (no prompts)"
+	@echo "    setup-cuda-auto  Automatic setup with CUDA (NVIDIA GPU)"
+	@echo "    train-info       Show hardware info and recommendations"
 	@echo ""
-	@echo "  === Running ==="
-	@echo "  run            - Start GSWA server (development)"
-	@echo "  run-prod       - Start GSWA server (production)"
+	@echo "  Training:"
+	@echo "    finetune-smart   One-click training (auto-detect platform) - RECOMMENDED"
+	@echo "    parse-corpus     Parse PDF/DOCX files to training data"
+	@echo "    status           Show corpus and training status"
 	@echo ""
-	@echo "  === Testing ==="
-	@echo "  test           - Run unit tests"
-	@echo "  lint           - Run linter"
-	@echo "  smoke-test     - Run end-to-end smoke test"
+	@echo "  Server:"
+	@echo "    run              Start development server"
+	@echo "    test             Run unit tests"
 	@echo ""
-	@echo "  === Corpus Management (语料管理) ==="
-	@echo "  corpus            - Show corpus status and files"
-	@echo "  corpus-guide      - Show quick guide for adding files"
-	@echo "  corpus-validate   - Validate all corpus files"
-	@echo "  parse-corpus      - Parse PDF/DOCX files to JSONL"
-	@echo "  build-index       - Build similarity index from corpus"
+	@echo "  AI Detection:"
+	@echo "    ai-check         Check text for AI traces"
+	@echo "    humanize         Auto-humanize text"
 	@echo ""
-	@echo "  === Training Wizard (Recommended) ==="
-	@echo "  train             - One-click training wizard (interactive)"
-	@echo "  train-auto        - Fully automatic training (no prompts)"
-	@echo "  train-safe        - Memory-safe training (RECOMMENDED for OOM)"
-	@echo "  train-model       - Train with specific model (MODEL=qwen-7b)"
-	@echo "  status            - Show corpus and training status"
-	@echo "  models            - List available models"
-	@echo ""
-	@echo "  === Fine-tuning (Advanced) ==="
-	@echo "  finetune-smart    - Smart training (auto-detect platform)"
-	@echo "  finetune-all      - Full pipeline: parse + train + finetune (Mac)"
-	@echo "  finetune-all-safe - Full pipeline with memory-safe mode (RECOMMENDED)"
-	@echo "  prepare-training  - Prepare training data from corpus"
-	@echo "  analyze-data      - Analyze training data (token lengths)"
-	@echo "  preprocess-data   - Preprocess data to split long sequences"
-	@echo "  finetune-lora     - Fine-tune with LoRA (Linux/Windows/GPU)"
-	@echo "  finetune-mlx      - Fine-tune with MLX (Mac Apple Silicon)"
-	@echo "  finetune-mlx-safe - Fine-tune with MLX (memory-safe mode)"
-	@echo "  export-dpo        - Export feedback for DPO training"
-	@echo "  list-docs         - List all document IDs in corpus"
-	@echo "  training-stats    - Show training data statistics"
-	@echo "  check-mlx         - Check MLX dependencies (Mac)"
-	@echo "  check-lora        - Check LoRA dependencies (Linux)"
-	@echo ""
-	@echo "  === Linux One-Click Training ==="
-	@echo "  train-linux       - One-click Linux/CUDA training (auto-config)"
-	@echo "  train-linux-safe  - Linux training with OOM fallback (RECOMMENDED)"
-	@echo "  train-info        - Show hardware info and recommendations"
-	@echo ""
-	@echo "  === Style Analysis & AI Detection ==="
-	@echo "  analyze-style     - Analyze author style from corpus"
-	@echo "  style-show        - Show current style fingerprint"
-	@echo "  ai-check          - Check text for AI traces (scientific analysis)"
-	@echo "  humanize          - Auto-humanize text to reduce AI score"
-	@echo ""
-	@echo "  === Utilities ==="
-	@echo "  clean          - Clean build artifacts"
+	@echo "  Advanced (see docs/TRAINING_GUIDE.md):"
+	@echo "    train-safe       Memory-safe training (Mac)"
+	@echo "    train-linux-safe Linux CUDA training with OOM fallback"
+
+# ==================
+# One-Click Setup
+# ==================
+
+# One-click environment setup (auto-install Python 3.10+ if needed)
+# 傻瓜式一键环境配置
+setup:
+	@bash scripts/setup.sh --dev
+
+# Automatic setup (no prompts)
+setup-auto:
+	@bash scripts/setup.sh --auto --dev
+
+# Setup with CUDA support (for NVIDIA GPUs)
+# 傻瓜式一键CUDA环境配置
+setup-cuda:
+	@bash scripts/setup.sh --dev --cuda
+
+# Automatic CUDA setup (no prompts)
+setup-cuda-auto:
+	@bash scripts/setup.sh --auto --dev --cuda
+
+# ==================
+# Installation
+# ==================
 
 # Install core dependencies
 install:

@@ -1,5 +1,56 @@
 # GSWA Training Guide - Foolproof One-Click Tutorial
 
+## Environment Setup (IMPORTANT - Read First!)
+
+### Linux Server (No sudo)
+
+在 Linux 服务器上训练前，请确保环境正确配置：
+
+```bash
+# 方式一：使用一键设置脚本（推荐）
+make setup-cuda      # 交互式安装
+make setup-cuda-auto # 全自动安装
+
+# 方式二：手动使用 micromamba
+micromamba create -n gswa python=3.11 -y
+micromamba activate gswa
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+pip install -e ".[dev,similarity]" pymupdf
+```
+
+### 常见问题：`_ctypes` 模块缺失
+
+如果遇到以下错误：
+```
+ModuleNotFoundError: No module named '_ctypes'
+```
+
+**原因**：pyenv 编译的 Python 缺少 libffi 支持（服务器无 sudo 无法安装 libffi-devel）
+
+**解决方案**：使用 micromamba 代替 pyenv
+```bash
+# micromamba 自带完整的 Python 环境，不需要系统库
+curl -L micro.mamba.pm/install.sh | bash
+source ~/.bashrc
+micromamba create -n gswa python=3.11 -y
+micromamba activate gswa
+```
+
+### 验证 CUDA 环境
+
+```bash
+# 检查 CUDA 是否可用
+micromamba run -n gswa python -c "import torch; print('CUDA:', torch.cuda.is_available())"
+
+# 应该输出：CUDA: True
+# 如果是 False，重新安装 PyTorch：
+micromamba run -n gswa pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+```
+
+详细安装指南请参考：[INSTALL.md](INSTALL.md)
+
+---
+
 ## Quick Start (Recommended)
 
 ### Mac (Apple Silicon)
@@ -38,11 +89,26 @@ Both commands automatically:
 
 ### Prerequisites
 
+**方式一：使用 conda 环境（推荐）**
 ```bash
-# Install CUDA training dependencies
-pip install torch transformers peft datasets accelerate bitsandbytes
+# 激活 conda 环境
+micromamba activate gswa
 
-# Verify CUDA is available
+# 验证 CUDA
+python -c "import torch; print(f'CUDA: {torch.cuda.is_available()}')"
+python -c "import torch; print(f'GPU: {torch.cuda.get_device_name(0)}')"
+```
+
+**方式二：使用 venv 环境**
+```bash
+# 激活 venv
+source venv/bin/activate
+
+# 安装 CUDA 训练依赖
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+pip install transformers peft datasets accelerate bitsandbytes
+
+# 验证 CUDA
 python -c "import torch; print(f'CUDA: {torch.cuda.is_available()}')"
 ```
 

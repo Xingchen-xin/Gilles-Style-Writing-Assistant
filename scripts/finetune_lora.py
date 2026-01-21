@@ -37,15 +37,28 @@ from datetime import datetime
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "training_profiles.json"
 
 # Model aliases for easier usage
+# Ungated models (no login required):
+#   mistral, mistral-large, mistral-nemo, qwen, qwen-14b, phi
+# Gated models (require HuggingFace login + approval):
+#   llama3.3, llama3-8b, llama3-70b, gemma
 MODEL_ALIASES = {
+    # Ungated - Mistral
     "mistral": "mistralai/Mistral-7B-Instruct-v0.3",
     "mistral-large": "mistralai/Mistral-Large-Instruct-2407",
-    "llama3": "meta-llama/Llama-3.1-8B-Instruct",
-    "llama3-70b": "meta-llama/Llama-3.1-70B-Instruct",
+    "mistral-nemo": "mistralai/Mistral-Nemo-Instruct-2407",
+    # Ungated - Qwen
     "qwen": "Qwen/Qwen2.5-7B-Instruct",
     "qwen-14b": "Qwen/Qwen2.5-14B-Instruct",
     "qwen-1.5b": "Qwen/Qwen2.5-1.5B-Instruct",
+    # Ungated - Microsoft
     "phi": "microsoft/Phi-3.5-mini-instruct",
+    # Gated - Meta Llama (require HF login + Meta approval)
+    "llama3": "meta-llama/Llama-3.1-8B-Instruct",
+    "llama3-8b": "meta-llama/Llama-3.1-8B-Instruct",
+    "llama3.3": "meta-llama/Llama-3.3-70B-Instruct",
+    "llama3.3-70b": "meta-llama/Llama-3.3-70B-Instruct",
+    "llama3-70b": "meta-llama/Llama-3.1-70B-Instruct",
+    # Gated - Google (require HF login + Google approval)
     "gemma": "google/gemma-2-9b-it",
     "gemma-2b": "google/gemma-2-2b-it",
 }
@@ -56,11 +69,12 @@ MODEL_ALIASES = {
 # ==============================================================================
 
 def get_gpu_info() -> dict:
-    """Detect NVIDIA GPU information."""
+    """Detect NVIDIA GPU information. Supports multi-GPU setups by summing VRAM."""
     info = {
         "available": False,
         "name": None,
         "vram_gb": 0,
+        "gpu_count": 0,
         "cuda_available": False,
     }
 
@@ -70,10 +84,26 @@ def get_gpu_info() -> dict:
             capture_output=True, text=True
         )
         if result.returncode == 0:
-            line = result.stdout.strip().split("\n")[0]
-            parts = line.split(",")
-            info["name"] = parts[0].strip()
-            info["vram_gb"] = float(parts[1].strip()) / 1024
+            lines = result.stdout.strip().split("\n")
+            gpu_count = len(lines)
+            total_vram_mb = 0
+            gpu_names = []
+
+            for line in lines:
+                parts = line.split(",")
+                name = parts[0].strip()
+                vram_mb = float(parts[1].strip())
+                gpu_names.append(name)
+                total_vram_mb += vram_mb
+
+            # Display name: show count if multiple GPUs
+            if gpu_count > 1:
+                info["name"] = f"{gpu_names[0]} x{gpu_count}"
+            else:
+                info["name"] = gpu_names[0]
+
+            info["vram_gb"] = total_vram_mb / 1024  # Total VRAM across all GPUs
+            info["gpu_count"] = gpu_count
             info["available"] = True
     except Exception:
         pass
@@ -83,8 +113,16 @@ def get_gpu_info() -> dict:
         import torch
         info["cuda_available"] = torch.cuda.is_available()
         if info["cuda_available"] and not info["name"]:
+            gpu_count = torch.cuda.device_count()
+            total_vram = sum(
+                torch.cuda.get_device_properties(i).total_memory
+                for i in range(gpu_count)
+            )
             info["name"] = torch.cuda.get_device_name(0)
-            info["vram_gb"] = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            if gpu_count > 1:
+                info["name"] = f"{info['name']} x{gpu_count}"
+            info["vram_gb"] = total_vram / (1024**3)
+            info["gpu_count"] = gpu_count
             info["available"] = True
     except Exception:
         pass
@@ -167,7 +205,17 @@ def auto_detect_settings() -> dict:
         "use_cpu": not gpu_info["cuda_available"],
     }
 
-    if vram >= 48:
+    if vram >= 60:
+        settings.update({
+            "batch_size": 1,  # 70B model with 4bit still needs batch_size=1
+            "gradient_accumulation_steps": 8,  # Effective batch = 8
+            "max_length": 1024,  # Reduced to save memory
+            "quantize": "4bit",  # 4bit for 70B model
+            "lora_r": 16,  # Smaller rank to save memory
+            "lora_alpha": 32,
+        })
+        profile = "Multi-GPU (60GB+) - Optimal for 70B models"
+    elif vram >= 48:
         settings.update({
             "batch_size": 8,
             "gradient_accumulation_steps": 1,
@@ -262,9 +310,17 @@ def check_dependencies():
     try:
         import torch
         if torch.cuda.is_available():
+            gpu_count = torch.cuda.device_count()
+            total_memory = sum(
+                torch.cuda.get_device_properties(i).total_memory
+                for i in range(gpu_count)
+            )
+            gpu_name = torch.cuda.get_device_name(0)
+            if gpu_count > 1:
+                gpu_name = f"{gpu_name} x{gpu_count}"
             print(f"\n  CUDA available: Yes")
-            print(f"  GPU: {torch.cuda.get_device_name(0)}")
-            print(f"  GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+            print(f"  GPU: {gpu_name}")
+            print(f"  GPU Memory: {total_memory / 1e9:.1f} GB (total across {gpu_count} GPU{'s' if gpu_count > 1 else ''})")
         else:
             print(f"\n  CUDA available: No (will use CPU, very slow)")
     except Exception:

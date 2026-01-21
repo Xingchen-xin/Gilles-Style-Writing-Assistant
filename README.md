@@ -44,6 +44,59 @@ GSWA 是一个本地部署的 AI 写作助手，专门用于将科学论文段�
 
 ## 快速开始
 
+### 环境要求
+
+- **Python 3.10+** （必需）
+- 16GB+ 内存
+- Mac: Apple Silicon (M1/M2/M3) 或 Intel
+- Linux: NVIDIA GPU（推荐 24GB+ VRAM）
+
+### 傻瓜式一键设置（推荐）
+
+不管是什么平台，都可以使用一键设置脚本：
+
+```bash
+# 克隆仓库
+git clone <repository-url>
+cd Gilles-Style-Writing-Assistant
+
+# 一键设置（自动检测/安装 Python 3.10+，创建环境，安装依赖）
+make setup
+
+# 或全自动模式（无需确认）
+make setup-auto
+
+# 有 NVIDIA GPU？使用 CUDA 版本（推荐用于训练）
+make setup-cuda
+
+# CUDA 全自动模式
+make setup-cuda-auto
+```
+
+脚本会自动：
+1. 检测系统中的 Python 3.10+（尝试 python3.13/3.12/3.11/3.10）
+2. 如果未找到，**自动使用 micromamba/conda 安装**（无需 sudo 权限）
+3. 检测 NVIDIA GPU 并提示安装 CUDA 支持
+4. 创建虚拟环境或 conda 环境
+5. 安装所有依赖（包括 PyTorch）
+
+> **服务器用户注意**：脚本支持无 sudo 权限的环境。在 Linux 服务器上推荐使用 micromamba（自动安装），它会自带完整的 Python 环境，不需要系统级的 libffi-devel 等依赖。
+
+#### 使用 conda 环境
+
+如果使用 micromamba/conda 环境，激活方式略有不同：
+
+```bash
+# 激活 conda 环境
+micromamba activate gswa
+
+# 或直接运行命令
+micromamba run -n gswa make test
+micromamba run -n gswa make run
+```
+
+---
+
 ### Mac 用户 (Apple Silicon M1/M2/M3)
 
 Mac 用户使用 **Ollama** 作为 LLM 后端，Ollama 对 Apple Silicon 有原生优化。
@@ -79,12 +132,11 @@ ollama pull mistral
 git clone <repository-url>
 cd Gilles-Style-Writing-Assistant
 
-# 创建虚拟环境
-python3 -m venv venv
-source venv/bin/activate
+# 一键设置（推荐，自动安装 micromamba 环境）
+make setup-auto
 
-# 安装依赖
-pip install -e ".[dev,similarity]"
+# 激活环境
+micromamba activate gswa
 ```
 
 #### 第四步：配置 GSWA 使用 Ollama
@@ -129,25 +181,32 @@ make setup-mac
 
 ### Linux 用户 (NVIDIA GPU)
 
-Linux 用户使用 **vLLM** 作为 LLM 后端，需要 NVIDIA GPU。
+Linux 服务器推荐使用 **micromamba** 管理环境（无需 sudo 权限）。
 
-#### 第一步：安装 vLLM
-
-```bash
-# 安装 vLLM（需要 CUDA）
-pip install vllm
-```
-
-#### 第二步：克隆并安装 GSWA
+#### 第一步：一键设置（推荐）
 
 ```bash
 git clone <repository-url>
 cd Gilles-Style-Writing-Assistant
 
-python3 -m venv venv
-source venv/bin/activate
+# 一键设置（自动安装 micromamba + Python + CUDA 依赖）
+make setup-cuda-auto
+```
 
-pip install -e ".[dev,similarity]"
+脚本会自动：
+1. 安装 micromamba（如果没有）
+2. 创建 `gswa` conda 环境
+3. 安装 PyTorch with CUDA
+4. 安装所有训练依赖
+
+#### 第二步：激活环境
+
+```bash
+# 激活 micromamba 环境（每次新终端都需要）
+micromamba activate gswa
+
+# 注意：使用 micromamba 后不需要 venv！
+# 如果看到 (venv) 提示，先运行 deactivate
 ```
 
 #### 第三步：配置（默认即可）
@@ -377,33 +436,19 @@ gswa/
 ### 常用命令
 
 ```bash
-# === 安装 ===
-make install          # 核心依赖
-make dev              # 开发依赖
+# === 一键操作（傻瓜式） ===
+make setup-cuda-auto  # Linux GPU 全自动安装
+make setup-auto       # Mac 全自动安装
+make finetune-smart   # 一键训练（自动检测平台和硬件）
+make run              # 启动服务器
 
-# === Mac 设置 ===
-make setup-mac        # 一键设置 Ollama
-make setup-ollama     # 仅配置 Ollama
-
-# === Linux 设置 ===
-make start-vllm       # 启动 vLLM
-
-# === 运行 ===
-make run              # 开发模式
-make run-prod         # 生产模式
-
-# === 测试 ===
-make test             # 单元测试
-make lint             # 代码检查
-make smoke-test       # 端到端测试
-
-# === 语料库 ===
-make parse-corpus     # 解析文档
-make build-index      # 构建索引
-
-# === 训练数据 ===
-make export-dpo       # 导出 DPO 数据
+# === 其他 ===
+make train-info       # 查看硬件信息
+make test             # 运行测试
+make parse-corpus     # 解析语料
 ```
+
+> **conda 环境用户**：激活后运行 `micromamba activate gswa`，或直接 `micromamba run -n gswa make test`
 
 ---
 
@@ -663,6 +708,63 @@ A: GSWA 设计为完全离线：
 2. 所有推理在本地进行
 3. 无任何外部 API 调用
 4. 无遥测数据发送
+
+### Q: `ModuleNotFoundError: No module named '_ctypes'` 怎么办？
+
+A: 这是因为 pyenv 编译的 Python 缺少 `libffi` 支持。服务器没有 sudo 权限时无法安装 `libffi-devel`。
+
+**解决方案**：使用 micromamba 代替 pyenv
+```bash
+# micromamba 自带完整 Python，不需要系统库
+curl -L micro.mamba.pm/install.sh | bash
+source ~/.bashrc
+
+# 创建新环境
+micromamba create -n gswa python=3.11 -y
+micromamba activate gswa
+
+# 重新安装
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+pip install -e ".[dev,similarity]" pymupdf
+```
+
+详细说明请参考：[docs/INSTALL.md](docs/INSTALL.md)
+
+### Q: CUDA 未检测到 / GPU 训练显示 CPU？
+
+A: 可能的原因和解决方案：
+
+**检查 CUDA 是否可用**：
+```bash
+# 1. 检查 nvidia-smi
+nvidia-smi
+
+# 2. 检查 PyTorch CUDA 版本
+python -c "import torch; print(f'CUDA: {torch.cuda.is_available()}')"
+python -c "import torch; print(f'Version: {torch.version.cuda}')"
+```
+
+**如果输出 CUDA: False**：
+```bash
+# 重新安装带 CUDA 的 PyTorch
+pip uninstall torch torchvision
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+```
+
+**如果看到 `_ctypes` 错误**：
+参考上一个问题的解决方案。
+
+### Q: Linux 服务器没有 sudo 权限怎么办？
+
+A: 本项目完全支持无 sudo 环境：
+
+```bash
+# 一键安装（自动使用 micromamba）
+make setup-cuda-auto
+
+# micromamba 会安装在用户目录下
+# 不需要任何系统级权限
+```
 
 ---
 

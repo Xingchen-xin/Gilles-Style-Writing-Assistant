@@ -14,7 +14,7 @@ from gswa.api.schemas import (
     FeedbackRequest, FeedbackResponse, FeedbackStats, FeedbackType
 )
 from gswa.config import get_settings
-from gswa.utils.ai_detector import get_ai_detector, AITraceResult
+from gswa.utils.ai_detector import get_ai_detector, AIDetectionResult
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +49,12 @@ class FeedbackService:
         """
         result = self._ai_detector.detect(text)
         return {
-            "ai_score": result.score,
-            "has_ai_traces": result.has_ai_traces,
-            "issue_count": len(result.issues),
+            "ai_score": result.ai_score,
+            "has_ai_traces": result.is_likely_ai,
+            "issue_count": len(result.pattern_issues),
             "top_issues": [
-                {"type": i["type"], "found": i.get("found", "")}
-                for i in result.issues[:3]
+                {"type": i["pattern"], "found": i.get("pattern", "")}
+                for i in result.pattern_issues[:3]
             ],
         }
 

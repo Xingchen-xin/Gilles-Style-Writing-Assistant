@@ -42,34 +42,42 @@ CONFIG_DIR = PROJECT_ROOT / "config"
 PROFILES_PATH = CONFIG_DIR / "training_profiles.json"
 
 # Base model recommendations based on task and hardware
+# For English scientific writing, Llama 3.3 is best but requires HuggingFace login
+# Mistral models are UNGATED fallback options
 MODEL_RECOMMENDATIONS = {
     "scientific_writing": {
         # Format: (min_vram_gb, model_id, description)
+        "tier_0": {
+            "min_vram": 60,
+            "models": {
+                "mlx": "mlx-community/Llama-3.3-70B-Instruct-4bit",
+                "cuda": "meta-llama/Llama-3.3-70B-Instruct",
+            },
+            "description": "Llama 3.3 70B - Best for English academic writing (requires HF login)",
+        },
         "tier_1": {
             "min_vram": 48,
             "models": {
                 "mlx": "mlx-community/Mistral-Large-Instruct-2407-4bit",
                 "cuda": "mistralai/Mistral-Large-Instruct-2407",
             },
-            "description": "Mistral Large - Best quality for scientific writing",
+            "description": "Mistral Large - Excellent for English scientific writing",
         },
         "tier_2": {
             "min_vram": 24,
             "models": {
-                "mlx": "mlx-community/Qwen2.5-14B-Instruct-4bit",
-                "cuda": "Qwen/Qwen2.5-14B-Instruct",
+                "mlx": "mlx-community/Mistral-Nemo-Instruct-2407-4bit",
+                "cuda": "mistralai/Mistral-Nemo-Instruct-2407",
             },
-            "description": "Qwen2.5 14B - Excellent for academic writing",
+            "description": "Mistral Nemo 12B - Strong English, good for academic style",
         },
         "tier_3": {
             "min_vram": 16,
             "models": {
-                "mlx": "mlx-community/Qwen2.5-7B-Instruct-4bit",
-                "cuda": "Qwen/Qwen2.5-7B-Instruct",
-                "alt_mlx": "mlx-community/Mistral-7B-Instruct-v0.3-4bit",
-                "alt_cuda": "mistralai/Mistral-7B-Instruct-v0.3",
+                "mlx": "mlx-community/Mistral-7B-Instruct-v0.3-4bit",
+                "cuda": "mistralai/Mistral-7B-Instruct-v0.3",
             },
-            "description": "Qwen2.5/Mistral 7B - Good balance of quality and speed",
+            "description": "Mistral 7B - Good balance for English writing",
         },
         "tier_4": {
             "min_vram": 8,
@@ -77,7 +85,7 @@ MODEL_RECOMMENDATIONS = {
                 "mlx": "mlx-community/Phi-3.5-mini-instruct-4bit",
                 "cuda": "microsoft/Phi-3.5-mini-instruct",
             },
-            "description": "Phi-3.5 Mini - Fast training, decent quality",
+            "description": "Phi-3.5 Mini - Fast training, decent English quality",
         },
         "tier_5": {
             "min_vram": 4,
@@ -258,18 +266,31 @@ def detect_gpu(info: SystemInfo):
 
 
 def detect_nvidia_gpu() -> Optional[dict]:
-    """Detect NVIDIA GPU using nvidia-smi."""
+    """Detect NVIDIA GPU using nvidia-smi. Supports multi-GPU setups."""
     try:
-        # Get GPU name and memory
+        # Get GPU name and memory for ALL GPUs
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
             capture_output=True, text=True
         )
         if result.returncode == 0:
-            line = result.stdout.strip().split("\n")[0]
-            parts = line.split(",")
-            name = parts[0].strip()
-            vram_mb = float(parts[1].strip())
+            lines = result.stdout.strip().split("\n")
+            gpu_count = len(lines)
+            total_vram_mb = 0
+            gpu_names = []
+
+            for line in lines:
+                parts = line.split(",")
+                name = parts[0].strip()
+                vram_mb = float(parts[1].strip())
+                gpu_names.append(name)
+                total_vram_mb += vram_mb
+
+            # Use first GPU name, but indicate multi-GPU if applicable
+            if gpu_count > 1:
+                display_name = f"{gpu_names[0]} x{gpu_count}"
+            else:
+                display_name = gpu_names[0]
 
             # Check CUDA availability
             cuda_available = False
@@ -280,8 +301,9 @@ def detect_nvidia_gpu() -> Optional[dict]:
                 pass
 
             return {
-                "name": name,
-                "vram_gb": vram_mb / 1024,
+                "name": display_name,
+                "vram_gb": total_vram_mb / 1024,  # Total VRAM across all GPUs
+                "gpu_count": gpu_count,
                 "cuda_available": cuda_available,
             }
     except Exception:
@@ -331,10 +353,10 @@ def determine_backend(info: SystemInfo):
         # CPU-only fallback
         info.recommended_backend = "cpu"
 
-    # Determine model tier based on available VRAM
+    # Determine model tier based on available VRAM (total across all GPUs)
     vram = info.gpu_vram_gb or info.ram_gb * 0.5  # Use half RAM for CPU
 
-    for tier_name in ["tier_1", "tier_2", "tier_3", "tier_4", "tier_5"]:
+    for tier_name in ["tier_0", "tier_1", "tier_2", "tier_3", "tier_4", "tier_5"]:
         tier = MODEL_RECOMMENDATIONS["scientific_writing"][tier_name]
         if vram >= tier["min_vram"]:
             info.recommended_model_tier = tier_name
@@ -362,21 +384,23 @@ def get_training_params(info: SystemInfo, model_tier: str) -> dict:
     }
 
     # Adjust based on VRAM
-    if vram >= 64:
+    # Note: For 70B models, even with 64GB VRAM, batch_size must be small
+    # The model itself uses ~35-40GB, leaving limited room for activations
+    if vram >= 60:  # Use 60 instead of 64 (32760MB * 2 / 1024 = 63.98)
         params.update({
-            "batch_size": 8,
-            "num_layers": 32,
-            "iters": 1500,
-            "max_seq_length": 2048,
-            "gradient_accumulation": 1,
+            "batch_size": 1,  # 70B model needs batch_size=1
+            "num_layers": 16,
+            "iters": 1000,
+            "max_seq_length": 1024,  # Reduced for memory
+            "gradient_accumulation": 8,  # Effective batch = 8
         })
     elif vram >= 32:
         params.update({
-            "batch_size": 4,
+            "batch_size": 2,
             "num_layers": 16,
             "iters": 1000,
             "max_seq_length": 1536,
-            "gradient_accumulation": 2,
+            "gradient_accumulation": 4,
         })
     elif vram >= 16:
         params.update({
@@ -610,14 +634,20 @@ def run_training(info: SystemInfo, args):
     # Override with user-specified model if provided
     if args.model:
         # Map short names to full model IDs
+        # NOTE: Llama/Gemma models are GATED - only use if you have HF access
         model_aliases = {
             "mistral": "mistralai/Mistral-7B-Instruct-v0.3",
             "mistral-large": "mistralai/Mistral-Large-Instruct-2407",
-            "llama3": "meta-llama/Llama-3.1-8B-Instruct",
-            "llama3-70b": "meta-llama/Llama-3.1-70B-Instruct",
+            "mistral-nemo": "mistralai/Mistral-Nemo-Instruct-2407",
             "qwen": "Qwen/Qwen2.5-7B-Instruct",
             "qwen-14b": "Qwen/Qwen2.5-14B-Instruct",
             "phi": "microsoft/Phi-3.5-mini-instruct",
+            # Gated models (require HuggingFace login + approval):
+            "llama3": "meta-llama/Llama-3.1-8B-Instruct",
+            "llama3-8b": "meta-llama/Llama-3.1-8B-Instruct",
+            "llama3.3": "meta-llama/Llama-3.3-70B-Instruct",
+            "llama3.3-70b": "meta-llama/Llama-3.3-70B-Instruct",
+            "llama3-70b": "meta-llama/Llama-3.1-70B-Instruct",  # older 3.1 version
             "gemma": "google/gemma-2-9b-it",
         }
         model_id = model_aliases.get(args.model.lower(), args.model)
@@ -731,8 +761,14 @@ Examples:
   # Dry run (show what would be executed)
   python scripts/smart_finetune.py --dry-run
 
-Available model shortcuts:
-  mistral, mistral-large, llama3, llama3-70b, qwen, qwen-14b, phi, gemma
+Available model shortcuts (ungated, no login needed):
+  mistral, mistral-large, mistral-nemo, qwen, qwen-14b, phi
+
+Gated models (require HuggingFace login + Meta approval):
+  llama3.3      - Llama 3.3 70B (RECOMMENDED for 60GB+ VRAM)
+  llama3-8b     - Llama 3.1 8B (fast testing)
+  llama3-70b    - Llama 3.1 70B (older version)
+  gemma         - Google Gemma 2 9B
         """
     )
 

@@ -315,17 +315,33 @@ class HardwareDetector:
             self._detect_nvidia_gpu()
 
     def _detect_nvidia_gpu(self):
-        """Detect NVIDIA GPU."""
+        """Detect NVIDIA GPU. Supports multi-GPU setups by summing VRAM."""
+        gpu_count = 0
         try:
             result = subprocess.run(
                 ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
                 capture_output=True, text=True
             )
             if result.returncode == 0:
-                line = result.stdout.strip().split("\n")[0]
-                parts = line.split(",")
-                self.info.cuda_device_name = parts[0].strip()
-                self.info.cuda_device_memory_gb = float(parts[1].strip()) / 1024
+                lines = result.stdout.strip().split("\n")
+                gpu_count = len(lines)
+                total_vram_mb = 0
+                gpu_names = []
+
+                for line in lines:
+                    parts = line.split(",")
+                    name = parts[0].strip()
+                    vram_mb = float(parts[1].strip())
+                    gpu_names.append(name)
+                    total_vram_mb += vram_mb
+
+                # Display name: show count if multiple GPUs
+                if gpu_count > 1:
+                    self.info.cuda_device_name = f"{gpu_names[0]} x{gpu_count}"
+                else:
+                    self.info.cuda_device_name = gpu_names[0]
+
+                self.info.cuda_device_memory_gb = total_vram_mb / 1024  # Total VRAM across all GPUs
         except Exception:
             pass
 
@@ -336,8 +352,15 @@ class HardwareDetector:
                 self.info.cuda_available = True
                 self.info.cuda_version = torch.version.cuda or ""
                 if not self.info.cuda_device_name:
+                    gpu_count = torch.cuda.device_count()
+                    total_vram = sum(
+                        torch.cuda.get_device_properties(i).total_memory
+                        for i in range(gpu_count)
+                    )
                     self.info.cuda_device_name = torch.cuda.get_device_name(0)
-                    self.info.cuda_device_memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+                    if gpu_count > 1:
+                        self.info.cuda_device_name = f"{self.info.cuda_device_name} x{gpu_count}"
+                    self.info.cuda_device_memory_gb = total_vram / (1024 ** 3)
         except ImportError:
             pass
 

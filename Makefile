@@ -1,4 +1,4 @@
-.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup setup-auto setup-mac setup-ollama prepare-training finetune-lora finetune-mlx finetune-mlx-safe finetune-all finetune-all-safe finetune-smart list-docs training-stats check-deps check-mlx check-lora corpus corpus-add corpus-guide corpus-validate train train-auto train-safe train-model status models analyze-style style-show ai-check humanize analyze-data preprocess-data train-linux train-linux-safe train-linux-full train-info
+.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup setup-auto setup-mac setup-ollama prepare-training finetune-lora finetune-mlx finetune-mlx-safe finetune-all finetune-all-safe finetune-smart finetune-deepspeed finetune-background list-docs training-stats check-deps check-mlx check-lora corpus corpus-add corpus-guide corpus-validate train train-auto train-safe train-model status models analyze-style style-show ai-check humanize analyze-data preprocess-data train-linux train-linux-safe train-linux-full train-info
 
 # Default target
 help:
@@ -31,8 +31,9 @@ help:
 	@echo "    humanize         Auto-humanize text"
 	@echo ""
 	@echo "  Advanced (see docs/TRAINING_GUIDE.md):"
-	@echo "    train-safe       Memory-safe training (Mac)"
-	@echo "    train-linux-safe Linux CUDA training with OOM fallback"
+	@echo "    train-safe           Memory-safe training (Mac)"
+	@echo "    train-linux-safe     Linux CUDA training with OOM fallback"
+	@echo "    finetune-background  Background training (tmux, survives terminal close)"
 
 # ==================
 # One-Click Setup
@@ -222,12 +223,44 @@ check-lora:
 
 # Smart fine-tuning: auto-detect platform and hardware
 # Works on Mac, Linux, and Windows
+# Automatically uses DeepSpeed for multi-GPU 70B+ models
 finetune-smart: parse-corpus prepare-training
 	python scripts/smart_finetune.py
 	@echo ""
 	@echo "============================================"
 	@echo "🎉 Fine-tuning complete!"
 	@echo "============================================"
+
+# DeepSpeed ZeRO-3 training for multi-GPU 70B+ models
+# Use this for proper gradient synchronization on multi-GPU setups
+# 多卡70B+模型训练（DeepSpeed ZeRO-3）
+finetune-deepspeed: parse-corpus prepare-training
+	@echo ""
+	@echo "============================================"
+	@echo "GSWA DeepSpeed Multi-GPU Training"
+	@echo "多卡训练模式 (DeepSpeed ZeRO-3)"
+	@echo "============================================"
+	@echo ""
+	@echo "This mode properly handles multi-GPU training for 70B+ models"
+	@echo "using DeepSpeed ZeRO-3 instead of device_map sharding."
+	@echo ""
+	accelerate launch --config_file config/accelerate_deepspeed.yaml \
+		scripts/finetune_deepspeed.py --model meta-llama/Llama-3.3-70B-Instruct
+	@echo ""
+	@echo "============================================"
+	@echo "🎉 DeepSpeed training complete!"
+	@echo "============================================"
+
+# Background training (runs in tmux, survives terminal close)
+# 后台训练模式（关闭终端不中断）
+finetune-background: parse-corpus prepare-training
+	@echo ""
+	@echo "============================================"
+	@echo "GSWA Background Training Mode"
+	@echo "后台训练模式 (tmux)"
+	@echo "============================================"
+	@echo ""
+	python scripts/smart_finetune.py --background --yes
 
 # ==================
 # Corpus Management

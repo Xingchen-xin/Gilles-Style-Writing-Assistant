@@ -487,20 +487,63 @@ def train_with_transformers(args):
     # Load tokenizer
     print(f"\nLoading tokenizer: {args.base_model}")
     tokenizer = AutoTokenizer.from_pretrained(args.base_model)
+
+    # Configure padding for training (right padding for causal LM)
+    tokenizer.padding_side = "right"
     if tokenizer.pad_token is None:
+        # Use a dedicated pad token if available, otherwise use eos
         tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    print(f"  Vocab size: {len(tokenizer)}")
+    print(f"  Pad token: {tokenizer.pad_token} (id={tokenizer.pad_token_id})")
+    print(f"  EOS token: {tokenizer.eos_token} (id={tokenizer.eos_token_id})")
 
     # Load model
     print(f"Loading model: {args.base_model}")
+
+    # Determine device map
+    # Note: Multi-GPU QLoRA training has known issues with cross-device tensor operations
+    # For models that fit on a single GPU, use single GPU for stability
+    # For very large models (70B+), we need multi-GPU but it may require DeepSpeed/FSDP
+    gpu_count = torch.cuda.device_count()
+
+    # Estimate model size from name to decide device mapping
+    model_name_lower = args.base_model.lower()
+    is_large_model = any(x in model_name_lower for x in ["70b", "72b", "65b", "large"])
+
+    if gpu_count == 1 or not is_large_model:
+        # Single GPU or small enough model - use GPU 0
+        device_map = {"": 0}
+        print(f"  Using single GPU (device_map: {{'': 0}})")
+    else:
+        # Large model + multi-GPU: try auto but warn about potential issues
+        device_map = "auto"
+        print(f"  Using multi-GPU (device_map: auto) - Note: May have stability issues")
+        print(f"  If training fails, consider using a smaller model or DeepSpeed")
+
     model = AutoModelForCausalLM.from_pretrained(
         args.base_model,
         quantization_config=bnb_config,
-        device_map="auto",
+        device_map=device_map,
         trust_remote_code=True,
+        torch_dtype=torch.bfloat16 if bnb_config else None,
     )
 
     if bnb_config:
         model = prepare_model_for_kbit_training(model)
+
+    # Verify model vocab size matches tokenizer
+    model_vocab_size = model.get_input_embeddings().weight.shape[0]
+    tokenizer_vocab_size = len(tokenizer)
+    print(f"\n  Model vocab size: {model_vocab_size}")
+    print(f"  Tokenizer vocab size: {tokenizer_vocab_size}")
+
+    # Note: Don't resize embeddings for quantized models - it can cause issues
+    # The model vocab size should be >= tokenizer vocab size
+    if model_vocab_size < tokenizer_vocab_size:
+        print(f"  WARNING: Model vocab ({model_vocab_size}) < tokenizer vocab ({tokenizer_vocab_size})")
+        print(f"           Some tokens may cause errors. Consider using a different model.")
 
     # Configure LoRA
     print(f"\nConfiguring LoRA (r={args.lora_r}, alpha={args.lora_alpha})")
@@ -556,30 +599,50 @@ def train_with_transformers(args):
     from datasets import Dataset
     dataset = Dataset.from_list(formatted_data)
 
+    # Get pad token id for label masking
+    pad_token_id = tokenizer.pad_token_id
+    vocab_size = len(tokenizer)
+
     def tokenize_function(examples):
         tokenized = tokenizer(
             examples["text"],
             truncation=True,
             max_length=args.max_length,
             padding="max_length",
+            return_tensors=None,  # Return lists, not tensors
         )
         # Create labels: copy input_ids but set padding tokens to -100
         # so they're ignored by the loss function
         labels = []
         for input_ids in tokenized["input_ids"]:
-            label = [
-                -100 if token_id == tokenizer.pad_token_id else token_id
-                for token_id in input_ids
-            ]
+            label = []
+            for token_id in input_ids:
+                if token_id == pad_token_id:
+                    label.append(-100)  # Ignore padding in loss
+                elif token_id >= vocab_size:
+                    # Safety check: if token exceeds vocab, mask it
+                    label.append(-100)
+                else:
+                    label.append(token_id)
             labels.append(label)
         tokenized["labels"] = labels
         return tokenized
 
+    # Disable caching to ensure fresh tokenization
+    print("\n  Tokenizing dataset (cache disabled)...")
     tokenized_dataset = dataset.map(
         tokenize_function,
         batched=True,
         remove_columns=["text"],
+        load_from_cache_file=False,  # Force re-tokenization
+        desc="Tokenizing",
     )
+
+    # Verify labels are correctly created
+    print(f"  Dataset columns: {tokenized_dataset.column_names}")
+    sample = tokenized_dataset[0]
+    num_masked = sum(1 for l in sample["labels"] if l == -100)
+    print(f"  Sample label stats: {len(sample['labels'])} tokens, {num_masked} masked (-100)")
 
     # Split into train/eval
     split = tokenized_dataset.train_test_split(test_size=0.1, seed=42)
@@ -628,9 +691,13 @@ def train_with_transformers(args):
         save_total_limit=3,
         warmup_ratio=0.1,
         lr_scheduler_type="cosine",
-        fp16=torch.cuda.is_available(),
+        # Use bf16 instead of fp16 for better compatibility with 4-bit quantization
+        bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
+        fp16=False,
         report_to="none",
         push_to_hub=False,
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
     )
 
     # Data collator - use default since we provide labels explicitly

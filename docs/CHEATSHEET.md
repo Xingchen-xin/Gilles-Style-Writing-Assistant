@@ -43,7 +43,9 @@ micromamba activate gswa  # 只用 micromamba
 |------|------|
 | `make help` | 显示所有命令 |
 | `make train-info` | 查看硬件信息 |
-| `make finetune-smart` | 一键训练 |
+| `make finetune-smart` | 一键训练 (自动选择后端) |
+| `make finetune-deepspeed` | 多卡70B+训练 (DeepSpeed) |
+| `make finetune-background` | **后台训练 (关闭终端不中断)** |
 | `make run` | 启动服务 |
 | `make test` | 运行测试 |
 
@@ -88,6 +90,43 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 make finetune-smart
 ```
 
+### 多卡训练失败
+```bash
+# 问题：多卡 QLoRA 可能不稳定
+# 解决：默认使用单卡模式 (Mistral 7B)
+
+# 推荐：使用默认设置 (Mistral 7B，稳定)
+make finetune-smart  # 自动选择 Mistral 7B
+
+# 或手动指定模型
+python scripts/smart_finetune.py --model mistral
+
+# 70B 模型需要 DeepSpeed (高级)
+# 注意：需要 CUDA 版本匹配
+python scripts/smart_finetune.py --model llama3.3 --deepspeed
+```
+
+### 后台训练 (Background Training)
+```bash
+# 问题：关闭终端或 SSH 断开导致训练中断
+# 解决：使用 --background 在 tmux 中后台运行
+
+# 一键后台训练
+make finetune-background
+
+# 或手动指定参数
+python scripts/smart_finetune.py --model llama3.3 --deepspeed --background
+
+# 查看训练进度
+tmux attach -t gswa-training
+
+# 脱离会话 (训练继续运行)
+# 按 Ctrl+B，然后按 D
+
+# 停止训练
+tmux kill-session -t gswa-training
+```
+
 ---
 
 ## 文件位置
@@ -107,11 +146,11 @@ make finetune-smart
 
 | VRAM | 推荐模型 | 命令 |
 |------|----------|------|
-| 60GB+ | Llama 3.3 70B | `make finetune-smart` (自动) |
-| 48GB+ | Mistral Large | `make finetune-smart --model mistral-large` |
+| 16GB+ | **Mistral 7B** (推荐) | `make finetune-smart` (默认) |
 | 24GB+ | Mistral Nemo 12B | `make finetune-smart --model mistral-nemo` |
-| 16GB+ | Mistral 7B | `make finetune-smart --model mistral` |
+| 48GB+ | Mistral Large | `make finetune-smart --model mistral-large` |
 | 8GB+ | Phi-3.5 Mini | `make finetune-smart --model phi` |
+| 60GB+ | Llama 3.3 70B (高级) | `--model llama3.3 --deepspeed` |
 
 ### 模型快捷名
 

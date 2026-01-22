@@ -337,6 +337,11 @@ if $USE_CONDA; then
         echo -e "${BLUE}Step 4: Installing PyTorch with CUDA support...${NC}"
         $CONDA_CMD run -n "$CONDA_ENV_NAME" pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
         echo -e "${GREEN}PyTorch with CUDA installed!${NC}"
+
+        # Install DeepSpeed and Accelerate for multi-GPU training
+        echo -e "${BLUE}Installing DeepSpeed for multi-GPU training...${NC}"
+        $CONDA_CMD run -n "$CONDA_ENV_NAME" pip install deepspeed accelerate pyyaml
+        echo -e "${GREEN}DeepSpeed installed!${NC}"
     elif $HAS_NVIDIA_GPU; then
         echo -e "${BLUE}Step 4: Installing PyTorch (CPU version)...${NC}"
         echo -e "${YELLOW}Use --cuda flag to install with GPU support${NC}"
@@ -383,6 +388,13 @@ if $USE_CONDA; then
         echo -e "  PyTorch: ${GREEN}$torch_version ($cuda_check)${NC}"
     else
         echo -e "  PyTorch: ${YELLOW}not installed${NC}"
+    fi
+
+    if $CONDA_CMD run -n "$CONDA_ENV_NAME" pip show deepspeed &> /dev/null; then
+        ds_version=$($CONDA_CMD run -n "$CONDA_ENV_NAME" pip show deepspeed | grep Version | cut -d' ' -f2)
+        echo -e "  DeepSpeed: ${GREEN}$ds_version${NC}"
+    else
+        echo -e "  DeepSpeed: ${YELLOW}not installed (for multi-GPU 70B+ training)${NC}"
     fi
 
     echo ""

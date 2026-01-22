@@ -40,20 +40,129 @@ SCRIPT_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 CONFIG_DIR = PROJECT_ROOT / "config"
 PROFILES_PATH = CONFIG_DIR / "training_profiles.json"
+TMUX_SESSION_NAME = "gswa-training"
+
+
+# ==============================================================================
+# Background/Tmux Support
+# ==============================================================================
+
+def is_tmux_available() -> bool:
+    """Check if tmux is installed."""
+    return shutil.which("tmux") is not None
+
+
+def is_in_tmux() -> bool:
+    """Check if we're already running inside a tmux session."""
+    return os.environ.get("TMUX") is not None
+
+
+def get_tmux_session_exists(session_name: str) -> bool:
+    """Check if a tmux session with the given name exists."""
+    try:
+        result = subprocess.run(
+            ["tmux", "has-session", "-t", session_name],
+            capture_output=True
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def launch_in_tmux(args) -> int:
+    """Launch training in a new tmux session."""
+    if not is_tmux_available():
+        print("\n" + "=" * 70)
+        print("ERROR: tmux Not Installed")
+        print("=" * 70)
+        print("\nInstall tmux to use --background mode:")
+        print("  Ubuntu/Debian: sudo apt install tmux")
+        print("  CentOS/RHEL:   sudo yum install tmux")
+        print("  Mac:           brew install tmux")
+        return 1
+
+    if is_in_tmux():
+        print("\n" + "=" * 70)
+        print("Already in tmux session")
+        print("=" * 70)
+        print("\nYou're already running inside tmux.")
+        print("Just run without --background flag.")
+        return 1
+
+    # Check if session already exists
+    if get_tmux_session_exists(TMUX_SESSION_NAME):
+        print("\n" + "=" * 70)
+        print(f"tmux Session '{TMUX_SESSION_NAME}' Already Exists")
+        print("=" * 70)
+        print("\nA training session is already running or exists.")
+        print(f"\nTo attach: tmux attach -t {TMUX_SESSION_NAME}")
+        print(f"To kill:   tmux kill-session -t {TMUX_SESSION_NAME}")
+        return 1
+
+    # Build the command to run inside tmux (without --background)
+    cmd_parts = [sys.executable, str(SCRIPT_DIR / "smart_finetune.py")]
+
+    if args.model:
+        cmd_parts.extend(["--model", args.model])
+    if args.deepspeed:
+        cmd_parts.append("--deepspeed")
+    if args.yes:
+        cmd_parts.append("--yes")
+    # Don't add --background to avoid infinite loop
+
+    # Get the conda/micromamba environment
+    conda_prefix = os.environ.get("CONDA_PREFIX", "")
+    conda_env_name = os.path.basename(conda_prefix) if conda_prefix else ""
+
+    # Build the full command with environment activation
+    if conda_env_name:
+        # Try micromamba first, then conda
+        full_cmd = f"micromamba activate {conda_env_name} 2>/dev/null || conda activate {conda_env_name}; {' '.join(cmd_parts)}"
+    else:
+        full_cmd = " ".join(cmd_parts)
+
+    # Create tmux session
+    print("\n" + "=" * 70)
+    print("Launching Training in Background (tmux)")
+    print("=" * 70)
+
+    try:
+        subprocess.run([
+            "tmux", "new-session", "-d", "-s", TMUX_SESSION_NAME,
+            "-c", str(PROJECT_ROOT),
+            "bash", "-c", f"{full_cmd}; echo ''; echo 'Training finished. Press Enter to close.'; read"
+        ], check=True)
+
+        print(f"\n✓ Training started in tmux session: {TMUX_SESSION_NAME}")
+        print(f"\n  To view progress:    tmux attach -t {TMUX_SESSION_NAME}")
+        print(f"  To detach (keep running): Press Ctrl+B, then D")
+        print(f"  To stop training:    tmux kill-session -t {TMUX_SESSION_NAME}")
+        print(f"\n  Log file:            training.log (if using nohup)")
+        print("\nYou can safely close this terminal.")
+        return 0
+
+    except subprocess.CalledProcessError as e:
+        print(f"\nERROR: Failed to create tmux session: {e}")
+        return 1
+
 
 # Base model recommendations based on task and hardware
-# For English scientific writing, Llama 3.3 is best but requires HuggingFace login
-# Mistral models are UNGATED fallback options
+# Model recommendations based on VRAM
+# For multi-GPU, use smaller models (7B-14B) with QLoRA for stability
+# 70B models require DeepSpeed ZeRO-3 with CPU offloading (advanced setup)
 MODEL_RECOMMENDATIONS = {
     "scientific_writing": {
         # Format: (min_vram_gb, model_id, description)
+        # NOTE: tier_0 (70B) requires DeepSpeed with proper CUDA version matching
+        # For most users, tier_2 or tier_3 provides best balance
         "tier_0": {
             "min_vram": 60,
             "models": {
                 "mlx": "mlx-community/Llama-3.3-70B-Instruct-4bit",
                 "cuda": "meta-llama/Llama-3.3-70B-Instruct",
             },
-            "description": "Llama 3.3 70B - Best for English academic writing (requires HF login)",
+            "description": "Llama 3.3 70B - Requires DeepSpeed (advanced)",
+            "requires_deepspeed": True,  # Marker for 70B+ models
         },
         "tier_1": {
             "min_vram": 48,
@@ -77,7 +186,7 @@ MODEL_RECOMMENDATIONS = {
                 "mlx": "mlx-community/Mistral-7B-Instruct-v0.3-4bit",
                 "cuda": "mistralai/Mistral-7B-Instruct-v0.3",
             },
-            "description": "Mistral 7B - Good balance for English writing",
+            "description": "Mistral 7B - RECOMMENDED for most setups",
         },
         "tier_4": {
             "min_vram": 8,
@@ -110,10 +219,12 @@ class SystemInfo:
     gpu_name: Optional[str] = None
     gpu_vram_gb: Optional[float] = None
     gpu_type: Optional[str] = None  # "apple", "nvidia", "amd", "intel", None
+    gpu_count: int = 1  # Number of GPUs
     cuda_available: bool = False
     mlx_available: bool = False
     recommended_backend: Optional[str] = None
     recommended_model_tier: Optional[str] = None
+    use_deepspeed: bool = False  # Whether to use DeepSpeed for multi-GPU
 
 
 # ==============================================================================
@@ -247,6 +358,7 @@ def detect_gpu(info: SystemInfo):
         info.gpu_type = "nvidia"
         info.gpu_name = nvidia_info["name"]
         info.gpu_vram_gb = nvidia_info["vram_gb"]
+        info.gpu_count = nvidia_info.get("gpu_count", 1)
         info.cuda_available = nvidia_info["cuda_available"]
         return
 
@@ -356,13 +468,32 @@ def determine_backend(info: SystemInfo):
     # Determine model tier based on available VRAM (total across all GPUs)
     vram = info.gpu_vram_gb or info.ram_gb * 0.5  # Use half RAM for CPU
 
-    for tier_name in ["tier_0", "tier_1", "tier_2", "tier_3", "tier_4", "tier_5"]:
-        tier = MODEL_RECOMMENDATIONS["scientific_writing"][tier_name]
-        if vram >= tier["min_vram"]:
-            info.recommended_model_tier = tier_name
-            break
+    # For multi-GPU CUDA setups, default to stable smaller models (tier_3 = Mistral 7B)
+    # 70B models require DeepSpeed ZeRO-3 which has CUDA version requirements
+    # Users can still request 70B with --model llama3.3 --deepspeed
+    if info.gpu_type == "nvidia" and info.gpu_count > 1:
+        # Default to Mistral 7B for multi-GPU (stable with QLoRA)
+        # Skip tier_0/tier_1 which may have multi-GPU issues
+        for tier_name in ["tier_2", "tier_3", "tier_4", "tier_5"]:
+            tier = MODEL_RECOMMENDATIONS["scientific_writing"][tier_name]
+            if vram >= tier["min_vram"]:
+                info.recommended_model_tier = tier_name
+                break
+        else:
+            info.recommended_model_tier = "tier_5"
     else:
-        info.recommended_model_tier = "tier_5"
+        # Single GPU or Mac: can use any tier based on VRAM
+        for tier_name in ["tier_0", "tier_1", "tier_2", "tier_3", "tier_4", "tier_5"]:
+            tier = MODEL_RECOMMENDATIONS["scientific_writing"][tier_name]
+            if vram >= tier["min_vram"]:
+                info.recommended_model_tier = tier_name
+                break
+        else:
+            info.recommended_model_tier = "tier_5"
+
+    # DeepSpeed is only used when explicitly requested (--deepspeed flag)
+    # or when user specifies a 70B+ model with --model
+    info.use_deepspeed = False
 
 
 # ==============================================================================
@@ -466,12 +597,19 @@ def print_system_info(info: SystemInfo):
     if info.gpu_type:
         print(f"{'GPU Type:':<25} {info.gpu_type.upper()}")
         print(f"{'GPU Name:':<25} {info.gpu_name}")
-        print(f"{'GPU VRAM:':<25} {info.gpu_vram_gb:.1f} GB")
+        print(f"{'GPU Count:':<25} {info.gpu_count}")
+        print(f"{'GPU VRAM (Total):':<25} {info.gpu_vram_gb:.1f} GB")
 
         if info.gpu_type == "apple":
             print(f"{'MLX Available:':<25} {'Yes' if info.mlx_available else 'No (pip install mlx mlx-lm)'}")
         elif info.gpu_type == "nvidia":
             print(f"{'CUDA Available:':<25} {'Yes' if info.cuda_available else 'No (install PyTorch with CUDA)'}")
+            if info.gpu_count > 1:
+                if info.use_deepspeed:
+                    print(f"{'Multi-GPU Mode:':<25} DeepSpeed ZeRO-3 (for 70B+ models)")
+                else:
+                    print(f"{'Multi-GPU Mode:':<25} Single GPU with QLoRA (stable)")
+                    print(f"{'Note:':<25} Use --deepspeed for 70B+ models")
     else:
         print("No GPU detected - will use CPU (slow)")
 
@@ -661,9 +799,33 @@ def run_training(info: SystemInfo, args):
     print(f"Model: {model_id}")
     print(f"Parameters: batch_size={params['batch_size']}, layers={params['num_layers']}, iters={params['iters']}")
 
+    # Check if this is a large model that needs DeepSpeed on multi-GPU
+    is_large_model = any(x in model_id.lower() for x in ["70b", "72b", "65b", "large"])
+    use_deepspeed = args.deepspeed if hasattr(args, 'deepspeed') else False
+
+    # For large models on multi-GPU, require explicit --deepspeed flag
+    if is_large_model and info.gpu_count > 1 and backend == "cuda":
+        if not use_deepspeed:
+            print(f"\n" + "=" * 70)
+            print("WARNING: Large Model on Multi-GPU")
+            print("=" * 70)
+            print(f"\nModel: {model_id}")
+            print(f"GPUs: {info.gpu_count}")
+            print("\n70B+ models require DeepSpeed ZeRO-3 for multi-GPU training.")
+            print("QLoRA with device_map is unstable for large models.")
+            print("\nOptions:")
+            print("  1. Add --deepspeed flag to use DeepSpeed ZeRO-3")
+            print("  2. Use a smaller model (recommended): --model mistral")
+            print("\nNote: DeepSpeed requires matching CUDA versions.")
+            print("      If you encounter build errors, use a smaller model.")
+            return False
+        print(f"\nUsing DeepSpeed ZeRO-3 for {info.gpu_count}-GPU 70B+ training")
+
     # Run appropriate training script
     if backend == "mlx":
         return run_mlx_training(model_id, params, args)
+    elif backend == "cuda" and use_deepspeed:
+        return run_deepspeed_training(model_id, params, args, info)
     elif backend in ["cuda", "rocm", "cpu"]:
         return run_lora_training(model_id, params, args, backend)
     else:
@@ -701,7 +863,7 @@ def run_mlx_training(model_id: str, params: dict, args) -> bool:
 
 
 def run_lora_training(model_id: str, params: dict, args, backend: str) -> bool:
-    """Run LoRA/QLoRA training on Linux/Windows."""
+    """Run LoRA/QLoRA training on Linux/Windows (single GPU or safe mode)."""
     script = SCRIPT_DIR / "finetune_lora.py"
 
     # Determine quantization based on VRAM
@@ -736,6 +898,78 @@ def run_lora_training(model_id: str, params: dict, args, backend: str) -> bool:
         return False
 
 
+def run_deepspeed_training(model_id: str, params: dict, args, info: SystemInfo) -> bool:
+    """Run DeepSpeed ZeRO-3 training for large models on multi-GPU.
+
+    This is the proper way to train 70B+ models on multiple GPUs.
+    Unlike device_map sharding, DeepSpeed properly handles gradient
+    synchronization and optimizer states across GPUs.
+    """
+    script = SCRIPT_DIR / "finetune_deepspeed.py"
+    config_file = CONFIG_DIR / "accelerate_deepspeed.yaml"
+
+    # Check if DeepSpeed is available
+    try:
+        import deepspeed
+        import accelerate
+    except ImportError:
+        print("\n" + "=" * 70)
+        print("ERROR: DeepSpeed/Accelerate Not Installed")
+        print("=" * 70)
+        print("\nFor multi-GPU 70B+ training, you need DeepSpeed:")
+        print("  pip install deepspeed accelerate")
+        print("\nOr use: ./scripts/setup.sh --cuda")
+        return False
+
+    # Update accelerate config for actual GPU count
+    update_accelerate_config(info.gpu_count)
+
+    cmd = [
+        "accelerate", "launch",
+        "--config_file", str(config_file),
+        str(script),
+        "--model", model_id,
+        "--batch-size", str(params["batch_size"]),
+        "--epochs", str(max(1, params["iters"] // 200)),
+        "--max-length", str(params["max_seq_length"]),
+        "--learning-rate", str(params["learning_rate"]),
+        "--gradient-accumulation-steps", str(params["gradient_accumulation"]),
+    ]
+
+    if args.dry_run:
+        print(f"\n[DRY RUN] Would execute:")
+        print(f"  {' '.join(cmd)}")
+        return True
+
+    print(f"\nExecuting DeepSpeed training with {info.gpu_count} GPUs...")
+    print(f"  Model: {model_id}")
+    print(f"  Config: {config_file}")
+
+    try:
+        result = subprocess.run(cmd)
+        return result.returncode == 0
+    except KeyboardInterrupt:
+        print("\n\nTraining interrupted by user.")
+        return False
+
+
+def update_accelerate_config(gpu_count: int):
+    """Update accelerate config with actual GPU count."""
+    import yaml
+
+    config_file = CONFIG_DIR / "accelerate_deepspeed.yaml"
+    if not config_file.exists():
+        return
+
+    with open(config_file, 'r') as f:
+        config = yaml.safe_load(f)
+
+    if config.get("num_processes") != gpu_count:
+        config["num_processes"] = gpu_count
+        with open(config_file, 'w') as f:
+            yaml.dump(config, f, default_flow_style=False)
+
+
 # ==============================================================================
 # Main
 # ==============================================================================
@@ -761,6 +995,14 @@ Examples:
   # Dry run (show what would be executed)
   python scripts/smart_finetune.py --dry-run
 
+  # Run in background (tmux) - survives terminal close
+  python scripts/smart_finetune.py --background
+  python scripts/smart_finetune.py --model llama3.3 --deepspeed --background
+
+  # Skip confirmation prompts (for scripts/automation)
+  python scripts/smart_finetune.py --yes
+  python scripts/smart_finetune.py --model mistral -y --background
+
 Available model shortcuts (ungated, no login needed):
   mistral, mistral-large, mistral-nemo, qwen, qwen-14b, phi
 
@@ -780,10 +1022,20 @@ Gated models (require HuggingFace login + Meta approval):
                         help="Show available models and exit")
     parser.add_argument("--model", type=str,
                         help="Force specific model (overrides auto-detection)")
+    parser.add_argument("--deepspeed", action="store_true",
+                        help="Force DeepSpeed ZeRO-3 for multi-GPU training")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be executed without running")
+    parser.add_argument("--background", "-bg", action="store_true",
+                        help="Run training in tmux session (survives terminal close)")
+    parser.add_argument("--yes", "-y", action="store_true",
+                        help="Skip confirmation prompts")
 
     args = parser.parse_args()
+
+    # Handle --background mode first (before any other processing)
+    if args.background:
+        return launch_in_tmux(args)
 
     print("\n" + "=" * 70)
     print("GSWA Smart Fine-tuning System")
@@ -807,6 +1059,10 @@ Gated models (require HuggingFace login + Meta approval):
         print_model_options()
         return 0
 
+    # Update deepspeed flag from args before printing
+    if args.deepspeed:
+        info.use_deepspeed = True
+
     # Print system info
     print_system_info(info)
 
@@ -818,10 +1074,11 @@ Gated models (require HuggingFace login + Meta approval):
         print("Training on CPU is possible but VERY slow (10-100x slower than GPU).")
         print("Recommended: Use a machine with NVIDIA GPU or Apple Silicon Mac.")
 
-        response = input("\nContinue with CPU training? (y/N): ")
-        if response.lower() != "y":
-            print("Aborted.")
-            return 1
+        if not args.yes:
+            response = input("\nContinue with CPU training? (y/N): ")
+            if response.lower() != "y":
+                print("Aborted.")
+                return 1
 
     if info.recommended_backend == "mlx" and not info.mlx_available:
         print("\n" + "=" * 70)
@@ -844,7 +1101,7 @@ Gated models (require HuggingFace login + Meta approval):
     print("Ready to Train")
     print("=" * 70)
 
-    if not args.dry_run:
+    if not args.dry_run and not args.yes:
         response = input("\nStart training? (Y/n): ")
         if response.lower() == "n":
             print("Aborted.")

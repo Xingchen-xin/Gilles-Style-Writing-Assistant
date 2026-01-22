@@ -142,13 +142,96 @@ make train-linux-safe
 
 ### NVIDIA GPU Memory Reference
 
-| GPU VRAM | Recommended Settings | Example GPUs |
-|----------|---------------------|--------------|
-| 4GB | batch=1, seq=512, 4bit quant | GTX 1650 |
-| 8GB | batch=1, seq=1024, 4bit quant | RTX 3060, RTX 4060 |
-| 16GB | batch=2, seq=1536, 4bit quant | RTX 4080, A4000 |
-| 24GB | batch=4, seq=2048, 4bit quant | RTX 3090, RTX 4090, A5000 |
-| 48GB | batch=8, seq=2048, no quant | A6000, A40 |
+| GPU VRAM | Recommended Model | Settings | Example GPUs |
+|----------|------------------|----------|--------------|
+| 4GB | Qwen 1.5B | batch=1, seq=512, 4bit | GTX 1650 |
+| 8GB | Phi-3.5 Mini | batch=1, seq=1024, 4bit | RTX 3060, RTX 4060 |
+| 16GB | **Mistral 7B** | batch=2, seq=1536, 4bit | RTX 4080, A4000 |
+| 24GB | Mistral Nemo 12B | batch=4, seq=2048, 4bit | RTX 3090, RTX 4090, A5000 |
+| 48GB | Mistral Large | batch=8, seq=2048, no quant | A6000, A40 |
+| 64GB+ (multi-GPU) | Mistral 7B (default) | QLoRA single GPU | 2x RTX 5000 Ada |
+| 64GB+ + DeepSpeed | Llama 3.3 70B | ZeRO-3, batch=1 | 2x RTX 5000 Ada |
+
+### Multi-GPU Training
+
+For multi-GPU setups, the system defaults to **Mistral 7B with single-GPU QLoRA** for stability.
+
+**Why not use all GPUs?**
+- `device_map="auto"` is **inference-style sharding** - doesn't handle gradient sync properly
+- QLoRA + device_map + multi-GPU = **unstable** (CUDA assertion errors)
+- Single GPU with QLoRA is stable and efficient for 7B-14B models
+
+```bash
+# Default: Mistral 7B on single GPU (stable)
+make finetune-smart
+
+# Or specify model explicitly
+python scripts/smart_finetune.py --model mistral
+python scripts/smart_finetune.py --model mistral-nemo  # 12B
+```
+
+### Background Training (Recommended for Long Runs)
+
+训练大模型需要数小时，建议使用后台模式防止终端关闭导致中断：
+
+```bash
+# 一键后台训练 (使用 tmux)
+make finetune-background
+
+# 或手动指定参数
+python scripts/smart_finetune.py --background
+python scripts/smart_finetune.py --model llama3.3 --deepspeed --background
+
+# 跳过确认提示 (适合脚本/自动化)
+python scripts/smart_finetune.py --model mistral -y --background
+```
+
+**管理后台训练：**
+```bash
+# 查看训练进度
+tmux attach -t gswa-training
+
+# 脱离会话 (训练继续运行): 按 Ctrl+B，然后按 D
+
+# 停止训练
+tmux kill-session -t gswa-training
+
+# 检查是否有训练在运行
+tmux list-sessions
+```
+
+**注意：** 需要安装 tmux (`apt install tmux` 或 `yum install tmux`)
+
+---
+
+### 70B+ Models (Advanced)
+
+For 70B+ models on multi-GPU, you need **DeepSpeed ZeRO-3**:
+
+**Requirements:**
+- 2+ GPUs with total 60GB+ VRAM
+- Matching CUDA versions (PyTorch CUDA version = system CUDA version)
+- Large CPU RAM (256GB+ recommended for CPU offloading)
+
+```bash
+# Explicit DeepSpeed mode for 70B models
+python scripts/smart_finetune.py --model llama3.3 --deepspeed
+
+# Direct DeepSpeed command
+accelerate launch --config_file config/accelerate_deepspeed.yaml \
+    scripts/finetune_deepspeed.py --model meta-llama/Llama-3.3-70B-Instruct
+```
+
+**If DeepSpeed fails with CUDA mismatch:**
+- Check: `nvcc --version` vs `python -c "import torch; print(torch.version.cuda)"`
+- If they differ, use a smaller model instead (e.g., Mistral 7B)
+
+**Install DeepSpeed:**
+```bash
+./scripts/setup.sh --cuda
+# Or manually
+pip install deepspeed accelerate pyyaml
+```
 
 ### OOM Fallback Strategy (CUDA)
 
@@ -175,14 +258,15 @@ python -m gswa.train train \
 
 ### Supported Models for Linux
 
-| Model | VRAM Required | Quality |
-|-------|--------------|---------|
-| `Qwen/Qwen2.5-1.5B-Instruct` | 4GB | Basic |
-| `microsoft/Phi-3.5-mini-instruct` | 8GB | Good |
-| `Qwen/Qwen2.5-7B-Instruct` | 16GB | Very Good |
-| `mistralai/Mistral-7B-Instruct-v0.3` | 16GB | Very Good |
-| `Qwen/Qwen2.5-14B-Instruct` | 24GB | Excellent |
-| `mistralai/Mistral-Large-Instruct-2407` | 48GB | Best |
+| Model | VRAM Required | Quality | Notes |
+|-------|--------------|---------|-------|
+| `mistralai/Mistral-7B-Instruct-v0.3` | 16GB | Very Good | **RECOMMENDED** - Stable, no login |
+| `mistralai/Mistral-Nemo-Instruct-2407` | 24GB | Excellent | Good for academic writing |
+| `Qwen/Qwen2.5-7B-Instruct` | 16GB | Very Good | No login required |
+| `microsoft/Phi-3.5-mini-instruct` | 8GB | Good | Fast training |
+| `Qwen/Qwen2.5-1.5B-Instruct` | 4GB | Basic | Minimum viable |
+| `mistralai/Mistral-Large-Instruct-2407` | 48GB | Excellent | Needs more VRAM |
+| `meta-llama/Llama-3.3-70B-Instruct` | 64GB+ | Best | Requires DeepSpeed + HF login |
 
 ---
 
@@ -564,6 +648,9 @@ pytest tests/test_training.py -v
 | `make train-linux-full` | Full pipeline with planner |
 | `make train-info` | Show hardware info and recommendations |
 | `make finetune-lora` | LoRA training (auto-detect settings) |
+| `make finetune-smart` | Smart training (auto-selects backend) |
+| `make finetune-deepspeed` | DeepSpeed ZeRO-3 for multi-GPU 70B+ |
+| `make finetune-background` | Background training (tmux, survives terminal close) |
 | `make check-lora` | Check LoRA dependencies |
 
 ### Utility Commands

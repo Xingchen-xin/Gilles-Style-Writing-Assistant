@@ -456,7 +456,6 @@ def train_with_transformers(args):
         AutoTokenizer,
         TrainingArguments,
         Trainer,
-        DataCollatorForLanguageModeling,
         BitsAndBytesConfig,
     )
     from peft import (
@@ -558,12 +557,23 @@ def train_with_transformers(args):
     dataset = Dataset.from_list(formatted_data)
 
     def tokenize_function(examples):
-        return tokenizer(
+        tokenized = tokenizer(
             examples["text"],
             truncation=True,
             max_length=args.max_length,
             padding="max_length",
         )
+        # Create labels: copy input_ids but set padding tokens to -100
+        # so they're ignored by the loss function
+        labels = []
+        for input_ids in tokenized["input_ids"]:
+            label = [
+                -100 if token_id == tokenizer.pad_token_id else token_id
+                for token_id in input_ids
+            ]
+            labels.append(label)
+        tokenized["labels"] = labels
+        return tokenized
 
     tokenized_dataset = dataset.map(
         tokenize_function,
@@ -623,11 +633,9 @@ def train_with_transformers(args):
         push_to_hub=False,
     )
 
-    # Data collator
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer,
-        mlm=False,
-    )
+    # Data collator - use default since we provide labels explicitly
+    from transformers import default_data_collator
+    data_collator = default_data_collator
 
     # Create trainer
     trainer = Trainer(

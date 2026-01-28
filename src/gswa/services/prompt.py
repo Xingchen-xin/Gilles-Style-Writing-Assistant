@@ -74,6 +74,16 @@ HARD CONSTRAINTS (MUST follow):
 
 Output ONLY the rewritten paragraph, no explanations or preamble."""
 
+# Simplified instructions for LoRA fine-tuned models
+# Must match the training data format exactly
+# Training used: instruction + "\n\n" + input (no system prompt)
+LORA_INSTRUCTIONS = [
+    "Enhance the academic tone and precision of this text:",
+    "Paraphrase this research paragraph in formal academic English:",
+    "Edit this scientific text for publication quality:",
+    "Rewrite this scientific text in a more polished academic style:",
+]
+
 
 # Strategy templates
 STRATEGY_TEMPLATES = {
@@ -174,6 +184,7 @@ class PromptService:
         is_fallback: bool = False,
         include_anti_ai: bool = True,
         include_style: bool = True,
+        for_lora: bool = False,
     ) -> str:
         """Build the system prompt.
 
@@ -182,10 +193,16 @@ class PromptService:
             is_fallback: Whether this is a fallback regeneration
             include_anti_ai: Include anti-AI detection rules
             include_style: Include author style guidance from fingerprint
+            for_lora: Use simplified prompt for LoRA fine-tuned models
 
         Returns:
             Complete system prompt string
         """
+        # For LoRA models, return empty - we'll use a direct instruction in user message
+        # This matches the training format: instruction + input (no system prompt)
+        if for_lora:
+            return ""
+
         parts = [SYSTEM_PROMPT]
 
         # Add anti-AI rules (critical for avoiding detection)
@@ -211,17 +228,29 @@ class PromptService:
         self,
         text: str,
         strategy: Strategy,
+        for_lora: bool = False,
+        variant_index: int = 0,
     ) -> str:
         """Build the user prompt with strategy.
 
         Args:
             text: The paragraph text to rewrite
             strategy: The rewriting strategy to use
+            for_lora: Use simple format matching LoRA training data
+            variant_index: Index for selecting instruction variation
 
         Returns:
             Complete user prompt string
         """
-        strategy_instruction = STRATEGY_TEMPLATES.get(strategy, STRATEGY_TEMPLATES[Strategy.A])
+        if for_lora:
+            # Match exact training format: instruction + "\n\n" + input
+            # No strategy, no extra formatting - just like training data
+            instruction = LORA_INSTRUCTIONS[variant_index % len(LORA_INSTRUCTIONS)]
+            return f"{instruction}\n\n{text}"
+
+        strategy_instruction = STRATEGY_TEMPLATES.get(
+            strategy, STRATEGY_TEMPLATES[Strategy.A]
+        )
 
         return f"""{strategy_instruction}
 

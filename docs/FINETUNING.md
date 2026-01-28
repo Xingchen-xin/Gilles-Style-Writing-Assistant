@@ -1,18 +1,22 @@
 # GSWA Fine-tuning Guide / 微调指南
 
-## TL;DR 傻瓜式操作 (3 Steps)
+## TL;DR 傻瓜式操作 (4 Steps)
 
 ```bash
-# 只需 3 步 / Just 3 steps:
+# 只需 4 步 / Just 4 steps:
 
 # 1. 放文章到文件夹 / Add your documents
 #    data/corpus/raw/                    <- 普通文章 / Regular articles
 #    data/corpus/raw/important_examples/ <- 重要文章 (2.5x权重) / Important examples
 
-# 2. 一键智能训练 / One-click smart training (works on Mac/Linux/Windows!)
+# 2. 生成风格转换对 / Generate style-transfer pairs (一次性，支持断点续传)
+make parse-corpus
+make generate-pairs OLLAMA_MODEL=qwen3-coder:30b
+
+# 3. 一键智能训练 / One-click smart training
 make finetune-smart
 
-# 3. 按照输出提示完成配置 / Follow the output instructions
+# 4. 按照输出提示完成配置 / Follow the output instructions
 ```
 
 ### 🚀 智能训练特性 / Smart Training Features
@@ -54,7 +58,27 @@ data/corpus/raw/                      <- 普通 Gilles 文章
 2. **风格不匹配** - 输出不像 Gilles 的写作风格
 3. **通用性过强** - 模型没有学习 Gilles 特有的表达方式
 
-解决方案：**微调模型使其学习 Gilles 的写作风格**
+解决方案：**Style-Transfer Fine-tuning (风格转换微调)**
+
+### 训练原理
+
+使用 **Approach B: Synthetic Pairs** 方法：
+1. 用本地 LLM 将 Gilles 的每个段落"简化"为通用学术英语
+2. 训练模型学习从{通用输入 → Gilles 风格输出}的映射
+3. 使用模型原生 chat template (`[INST]...[/INST]`) 确保训练和推理格式一致
+4. Label masking 确保只训练 response tokens
+
+**示例:**
+```
+Input (通用):  "SEM analysis confirmed earlier aerial hyphae development in the mutant."
+Output (Gilles): "The precocious erection of aerial hyphae in the redD mutant was confirmed
+                  by scanning electron microscopy (SEM)."
+```
+
+模型学到的转换：
+- "earlier development" → "precocious erection" (精确、生动的词汇)
+- 被动句 → 复杂从属结构
+- 添加 discourse markers (Indeed, Notably, Together)
 
 ---
 
@@ -72,14 +96,53 @@ data/corpus/raw/                      <- 普通 Gilles 文章
 | 显存/内存 | 推荐模型 | 说明 |
 |-----------|----------|------|
 | 8GB | `Qwen/Qwen2.5-1.5B-Instruct` | 最小可用，基础质量 |
-| 16GB | `Qwen/Qwen2.5-7B-Instruct` | **推荐大多数用户** |
-| 24GB | `Qwen/Qwen2.5-14B-Instruct` | 更好的写作质量 |
-| 48GB+ | `mistralai/Mistral-Large-Instruct-2407` | 最佳质量 |
+| 16GB | `mistralai/Mistral-7B-Instruct-v0.3` | 推荐入门用户 |
+| 24GB+ | `mistralai/Mistral-Nemo-Instruct-2407` | **推荐** - 12B 模型，最佳性价比 |
+| 48GB+ | `mistralai/Mistral-Large-Instruct-2407` | 高质量输出 |
+| 60GB+ | `meta-llama/Llama-3.3-70B-Instruct` | 可选 (需要 `--model llama3.3`) |
 
-**为什么推荐 Qwen2.5?**
-- 在学术写作任务上表现优秀
-- 对中英文双语支持良好
-- 训练效率高，收敛快
+**为什么推荐 Mistral-Nemo 12B?**
+- **模型容量与数据量匹配**: 12B 参数对 ~1000 样本更合适，避免过拟合
+- **可用更大 batch size**: batch=4 vs 70B 的 batch=1，梯度更稳定
+- **训练速度快**: 比 70B 快 3-4 倍
+- **英文学术写作质量优秀**: 在科学写作任务上表现出色
+- **支持长上下文**: 32K tokens
+
+**关于 70B+ 大模型**
+- 70B 模型适合数据量充足 (>5000 样本) 的场景
+- 对于 ~1000 样本的数据集，12B 模型通常效果更好
+- 如需使用 70B，请显式指定: `--model llama3.3`
+- 多 GPU 系统会自动启用 DeepSpeed ZeRO-3
+
+```bash
+# 自动选择最佳模型（推荐 Mistral-Nemo 12B）
+make finetune-smart
+
+# 后台运行（保存日志）
+python scripts/smart_finetune.py --background -y
+
+# 手动指定 70B 模型（需要大量数据）
+python scripts/smart_finetune.py --model llama3.3 -y
+
+# 查看训练日志
+tail -f logs/finetune-background-*.log
+```
+
+**关于 Mistral tokenizer 警告**
+- Mistral 系列模型的 tokenizer 警告已自动处理
+- 脚本会自动应用 `fix_mistral_regex=True` 并抑制警告
+
+## 训练参数说明
+
+| 参数 | Mistral-Nemo 12B | Llama 70B | 说明 |
+|------|------------------|-----------|------|
+| batch_size | 4 | 1 | 更大 batch = 更稳定梯度 |
+| gradient_accumulation | 4 | 8 | 有效 batch = batch × accum |
+| lora_r | 32 | 16 | LoRA 秩，越大容量越大 |
+| lora_alpha | 64 | 32 | 通常 = 2 × lora_r |
+| learning_rate | 1e-4 | 5e-5 | QLoRA 标准值 |
+| epochs | 3 | 1-2 | 根据数据量调整 |
+| max_length | 2048 | 1024 | 学术文章通常较长 |
 
 ## 微调方案对比
 
@@ -182,29 +245,48 @@ make run
 
 ```bash
 # 安装训练依赖
-make install-train
+make setup-cuda-auto
+# 或手动
+micromamba create -n gswa python=3.11 -y && micromamba activate gswa
+pip install -e ".[dev,similarity]" pymupdf
 ```
 
-### 第三步：一键智能微调
+### 第三步：生成 Style-Transfer Pairs
 
 ```bash
-# 🚀 推荐：智能训练（自动检测GPU并选择参数）
+# 解析语料库
+make parse-corpus
+
+# 生成风格对 (一次性操作，支持断点续传，~4小时)
+make generate-pairs OLLAMA_MODEL=qwen3-coder:30b
+
+# 或后台运行
+nohup micromamba run -n gswa python -u scripts/prepare_training_data.py \
+    --generate-pairs --ollama-model qwen3-coder:30b > /tmp/pair_generation.log 2>&1 &
+tail -f /tmp/pair_generation.log  # 监控进度
+```
+
+### 第四步：训练模型
+
+```bash
+# 一键智能训练（自动检测GPU并选择参数）
 make finetune-smart
 
-# 或者手动运行 LoRA 训练
-make finetune-lora
+# 后台训练（推荐，关闭终端不中断）
+make finetune-background
 ```
 
-### 第四步：部署模型
-
-微调完成后，模型保存在 `models/gswa-lora-*/`。
+### 第五步：评估和部署
 
 ```bash
-# 使用 PEFT 合并模型（可选）
-python scripts/merge_lora.py
+# 评估模型效果
+make evaluate MODEL_DIR=models/gswa-lora-Mistral-<timestamp>
 
-# 或者直接配置 .env 使用 LoRA adapter
-LORA_ADAPTER_PATH=./models/gswa-lora-xxx
+# 查看训练曲线
+make visualize MODEL_DIR=models/gswa-lora-Mistral-<timestamp>
+
+# 部署：配置 .env 使用 LoRA adapter
+LORA_ADAPTER_PATH=./models/gswa-lora-Mistral-<timestamp>
 ```
 
 ---
@@ -310,18 +392,29 @@ make parse-corpus      # 解析 raw/ 中的文章
 make list-docs         # 列出所有文章 ID
 make training-stats    # 查看训练数据统计
 
+# === 数据准备 ===
+make generate-pairs    # 生成 style-transfer pairs (一次性，~4小时)
+make prepare-training  # 从 pairs 生成 Alpaca 格式训练数据
+
 # === 智能训练 ===
-make finetune-smart    # 🚀 一键智能训练（自动检测平台和硬件）
+make finetune-smart    # 一键智能训练（自动检测平台和硬件）
+make finetune-background  # 后台训练（关闭终端不中断）
 make finetune-all      # Mac 一键训练（parse + prepare + mlx）
 
+# === 评估和可视化 ===
+make visualize MODEL_DIR=models/gswa-lora-...  # 训练曲线
+make evaluate MODEL_DIR=models/gswa-lora-...   # 生成样本评估
+make compare-runs      # 多次训练对比
+
 # === 分步训练 ===
-make prepare-training  # 生成训练数据
 make finetune-mlx      # Mac MLX 微调
 make finetune-lora     # Linux/Windows LoRA 微调
+make finetune-deepspeed  # 多卡 70B+ 模型
 
 # === 环境检查 ===
 make check-mlx         # 检查 MLX 依赖 (Mac)
 make check-lora        # 检查 LoRA 依赖 (Linux/Windows)
+make train-info        # 查看硬件信息和推荐
 ```
 
 ---
@@ -405,8 +498,35 @@ python scripts/finetune_mlx_mac.py --batch-size 1 --num-layers 4 --max-seq-lengt
 
 A: 使用 4-bit 量化：
 ```bash
-python scripts/finetune_lora.py --quantize 4bit --batch-size 2
+python scripts/finetune_lora.py --quantize 4bit --batch-size 1
 ```
+
+### Q: 训练卡在 0%？/ Training stuck at 0%?
+
+A: 可能的原因和解决方案：
+
+1. **Mistral 模型兼容性问题** - 已在最新版本中修复
+   ```bash
+   git pull  # 更新到最新版本
+   ```
+
+2. **显存不足** - 尝试使用更小的模型
+   ```bash
+   python scripts/smart_finetune.py --model mistral  # 使用 7B 模型
+   ```
+
+3. **多 GPU 冲突** - 强制使用单卡
+   ```bash
+   CUDA_VISIBLE_DEVICES=0 python scripts/finetune_lora.py --model mistral
+   ```
+
+4. **梯度检查点问题** - 脚本已自动处理 Mistral 模型的兼容性
+
+5. **日志中只显示 0%** - tqdm 在日志文件中不会持续刷新
+   ```bash
+   # 关闭 tqdm 并强制每步输出
+   python scripts/finetune_lora.py --disable-tqdm --log-every 1
+   ```
 
 ### Q: 生成质量下降？
 

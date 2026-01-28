@@ -38,6 +38,7 @@ class RewriteRequest(BaseModel):
     n_variants: int = Field(default=3, ge=1, le=5)
     strategies: Optional[list[Strategy]] = None
     constraints: RewriteConstraints = Field(default_factory=RewriteConstraints)
+    model: Optional[str] = Field(None, description="Model/adapter ID to use (from /v1/models)")
 
     @field_validator("text")
     @classmethod
@@ -99,6 +100,28 @@ class HealthResponse(BaseModel):
     model_loaded: Optional[str]
     corpus_paragraphs: int
     index_loaded: bool
+    available_models: int = 0
+
+
+class ModelInfo(BaseModel):
+    """Information about a trained model/adapter."""
+    id: str = Field(..., description="Unique model identifier (directory name)")
+    display_name: str = Field(..., description="Human-readable name")
+    base_model: str = Field(..., description="HuggingFace base model ID")
+    model_short: str = Field(..., description="Short base model name")
+    adapter_path: str = Field(..., description="Path to LoRA adapter")
+    quantization: str = Field(default="4bit")
+    lora_r: int = Field(default=16)
+    epochs: int = Field(default=3)
+    started_at: str = Field(default="")
+    completed_at: str = Field(default="")
+
+
+class ModelsResponse(BaseModel):
+    """Response body for /v1/models."""
+    models: list[ModelInfo]
+    active_model: Optional[str] = Field(None, description="Currently active model/adapter")
+    base_model: Optional[str] = Field(None, description="Base model being served")
 
 
 # === Feedback Schemas (for DPO training) ===
@@ -146,3 +169,30 @@ class FeedbackStats(BaseModel):
     bad_count: int
     edited_count: int
     ai_like_count: int = 0  # Count of AI-like flagged variants
+
+
+# === Style Analysis Schemas (Model-based evaluation) ===
+
+class StyleAnalysisRequest(BaseModel):
+    """Request body for /v1/style/analyze."""
+    text: str = Field(..., min_length=50, max_length=10000)
+    reference_style: str = Field(
+        default="gilles",
+        description="Reference style to compare against (currently only 'gilles')"
+    )
+
+
+class StyleDimension(BaseModel):
+    """Score for a single style dimension."""
+    name: str = Field(..., description="Dimension name (e.g., 'Sentence Complexity')")
+    score: int = Field(..., ge=0, le=10, description="Score from 0-10")
+    feedback: str = Field(..., description="Specific feedback for this dimension")
+
+
+class StyleAnalysisResponse(BaseModel):
+    """Response body for /v1/style/analyze."""
+    overall_score: int = Field(..., ge=0, le=100, description="Overall style match score 0-100")
+    summary: str = Field(..., description="Brief overall assessment")
+    dimensions: list[StyleDimension] = Field(..., description="Scores for each style dimension")
+    suggestions: list[str] = Field(default_factory=list, description="Improvement suggestions")
+    model_used: str = Field(..., description="Model used for analysis")

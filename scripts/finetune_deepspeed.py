@@ -116,7 +116,11 @@ def main():
 
     # Load tokenizer
     print(f"\nLoading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer_kwargs = {}
+    if "mistral" in model_name.lower():
+        tokenizer_kwargs["fix_mistral_regex"] = True
+        print("  Applying Mistral tokenizer regex fix (fix_mistral_regex=True)")
+    tokenizer = AutoTokenizer.from_pretrained(model_name, **tokenizer_kwargs)
     tokenizer.padding_side = "right"
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -136,7 +140,7 @@ def main():
     print("Loading model with ZeRO-3 parameter partitioning...")
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         trust_remote_code=True,
     )
 

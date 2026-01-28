@@ -25,6 +25,7 @@ import json
 import os
 import platform
 import shutil
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -41,6 +42,13 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 CONFIG_DIR = PROJECT_ROOT / "config"
 PROFILES_PATH = CONFIG_DIR / "training_profiles.json"
 TMUX_SESSION_NAME = "gswa-training"
+LARGE_MODEL_HINTS = ["70b", "72b", "65b", "large", "llama3.3", "llama3-70b", "llama3.3-70b", "qwen-72b"]
+
+
+def is_large_model_name(name: str) -> bool:
+    """Heuristic check for 70B-class or very large models."""
+    name_lower = name.lower()
+    return any(hint in name_lower for hint in LARGE_MODEL_HINTS)
 
 
 # ==============================================================================
@@ -100,26 +108,44 @@ def launch_in_tmux(args) -> int:
         return 1
 
     # Build the command to run inside tmux (without --background)
-    cmd_parts = [sys.executable, str(SCRIPT_DIR / "smart_finetune.py")]
+    # Use 'python' instead of sys.executable so it uses the activated environment's python
+    cmd_parts = ["python", str(SCRIPT_DIR / "smart_finetune.py")]
 
     if args.model:
         cmd_parts.extend(["--model", args.model])
     if args.deepspeed:
         cmd_parts.append("--deepspeed")
+    if args.no_deepspeed:
+        cmd_parts.append("--no-deepspeed")
     if args.yes:
         cmd_parts.append("--yes")
+    if args.style_enhanced:
+        cmd_parts.append("--style-enhanced")
     # Don't add --background to avoid infinite loop
 
+    log_path = None
+    if args.log_file:
+        log_path = Path(args.log_file)
+        if not log_path.is_absolute():
+            log_path = PROJECT_ROOT / log_path
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
     # Get the conda/micromamba environment
-    conda_prefix = os.environ.get("CONDA_PREFIX", "")
-    conda_env_name = os.path.basename(conda_prefix) if conda_prefix else ""
+    conda_env_name = os.environ.get("CONDA_DEFAULT_ENV", "")
+
+    # If we're in 'base' environment, use 'gswa' instead (project-specific env)
+    if conda_env_name == "base" or not conda_env_name:
+        conda_env_name = "gswa"
 
     # Build the full command with environment activation
-    if conda_env_name:
-        # Try micromamba first, then conda
-        full_cmd = f"micromamba activate {conda_env_name} 2>/dev/null || conda activate {conda_env_name}; {' '.join(cmd_parts)}"
-    else:
-        full_cmd = " ".join(cmd_parts)
+    # For micromamba: need to init shell hook first, then activate
+    # NCCL_P2P_DISABLE=1 is needed for multi-GPU DDP on systems without NVLink
+    # PYTHONUNBUFFERED=1 ensures real-time log output in background mode
+    full_cmd = f'export NCCL_P2P_DISABLE=1 PYTHONUNBUFFERED=1 && eval "$(micromamba shell hook -s bash)" && micromamba activate {conda_env_name} && {" ".join(cmd_parts)}'
+
+    if log_path:
+        log_quoted = shlex.quote(str(log_path))
+        full_cmd = f"{full_cmd} |& tee -a {log_quoted}"
 
     # Create tmux session
     print("\n" + "=" * 70)
@@ -137,7 +163,8 @@ def launch_in_tmux(args) -> int:
         print(f"\n  To view progress:    tmux attach -t {TMUX_SESSION_NAME}")
         print(f"  To detach (keep running): Press Ctrl+B, then D")
         print(f"  To stop training:    tmux kill-session -t {TMUX_SESSION_NAME}")
-        print(f"\n  Log file:            training.log (if using nohup)")
+        if log_path:
+            print(f"\n  Log file:            {log_path}")
         print("\nYou can safely close this terminal.")
         return 0
 
@@ -468,19 +495,23 @@ def determine_backend(info: SystemInfo):
     # Determine model tier based on available VRAM (total across all GPUs)
     vram = info.gpu_vram_gb or info.ram_gb * 0.5  # Use half RAM for CPU
 
-    # For multi-GPU CUDA setups, default to stable smaller models (tier_3 = Mistral 7B)
-    # 70B models require DeepSpeed ZeRO-3 which has CUDA version requirements
-    # Users can still request 70B with --model llama3.3 --deepspeed
+    # For multi-GPU CUDA setups, recommend Mistral-Nemo 12B as default
+    # This provides best balance of quality vs training stability for typical datasets (~1000 samples)
+    # 70B models are available but require --model llama3.3 explicit flag
     if info.gpu_type == "nvidia" and info.gpu_count > 1:
-        # Default to Mistral 7B for multi-GPU (stable with QLoRA)
-        # Skip tier_0/tier_1 which may have multi-GPU issues
-        for tier_name in ["tier_2", "tier_3", "tier_4", "tier_5"]:
-            tier = MODEL_RECOMMENDATIONS["scientific_writing"][tier_name]
-            if vram >= tier["min_vram"]:
-                info.recommended_model_tier = tier_name
-                break
+        if vram >= 24:
+            # Multi-GPU with 24GB+ VRAM: recommend Mistral-Nemo 12B (tier_2)
+            # Better for typical dataset sizes, allows larger batch sizes
+            info.recommended_model_tier = "tier_2"
         else:
-            info.recommended_model_tier = "tier_5"
+            # Multi-GPU with less VRAM: use smaller models
+            for tier_name in ["tier_3", "tier_4", "tier_5"]:
+                tier = MODEL_RECOMMENDATIONS["scientific_writing"][tier_name]
+                if vram >= tier["min_vram"]:
+                    info.recommended_model_tier = tier_name
+                    break
+            else:
+                info.recommended_model_tier = "tier_5"
     else:
         # Single GPU or Mac: can use any tier based on VRAM
         for tier_name in ["tier_0", "tier_1", "tier_2", "tier_3", "tier_4", "tier_5"]:
@@ -491,8 +522,7 @@ def determine_backend(info: SystemInfo):
         else:
             info.recommended_model_tier = "tier_5"
 
-    # DeepSpeed is only used when explicitly requested (--deepspeed flag)
-    # or when user specifies a 70B+ model with --model
+    # DeepSpeed selection is determined later based on args + model size
     info.use_deepspeed = False
 
 
@@ -501,53 +531,96 @@ def determine_backend(info: SystemInfo):
 # ==============================================================================
 
 def get_training_params(info: SystemInfo, model_tier: str) -> dict:
-    """Get training parameters based on system and model."""
-    vram = info.gpu_vram_gb or info.ram_gb * 0.5
+    """Get training parameters based on system and model.
 
-    # Base parameters
+    Parameters are optimized for:
+    - Stability: Larger effective batch sizes for stable gradients
+    - Preventing overfitting: Appropriate epochs for dataset size
+    - Quality: Sufficient LoRA capacity for style learning
+
+    Multi-GPU DDP notes:
+    - batch_size is per-GPU (each GPU processes its own batch)
+    - Effective batch = batch_size × num_gpus × gradient_accumulation
+    - Each GPU loads the full 4-bit model (~7GB), so per-GPU VRAM is the constraint
+    """
+    vram = info.gpu_vram_gb or info.ram_gb * 0.5
+    gpu_count = max(1, info.gpu_count) if info.gpu_count else 1
+
+    # Base parameters (conservative defaults)
     params = {
         "batch_size": 1,
         "num_layers": 4,
         "iters": 300,
         "max_seq_length": 512,
-        "learning_rate": 1e-5,
+        "learning_rate": 1e-4,  # Standard QLoRA learning rate
         "gradient_accumulation": 4,
+        "lora_r": 16,
+        "lora_alpha": 32,
     }
 
-    # Adjust based on VRAM
-    # Note: For 70B models, even with 64GB VRAM, batch_size must be small
-    # The model itself uses ~35-40GB, leaving limited room for activations
-    if vram >= 60:  # Use 60 instead of 64 (32760MB * 2 / 1024 = 63.98)
+    # Per-GPU VRAM is the memory constraint (DDP loads full model on each GPU)
+    per_gpu_vram = vram / gpu_count
+
+    if per_gpu_vram >= 30:
+        # 30GB+ per GPU (e.g., 2x RTX 5000 Ada 32GB)
+        # 12B 4-bit model: ~7GB weights + activations
+        if gpu_count >= 2:
+            # Multi-GPU DDP: can use larger batch and LoRA rank
+            # Memory per GPU: 7GB model + ~14GB activations (batch=2, max_len=1024) = ~21GB
+            params.update({
+                "batch_size": 2,  # Per-GPU batch size
+                "num_layers": 16,
+                "iters": 600,
+                "max_seq_length": 1024,
+                "learning_rate": 1e-4,
+                "gradient_accumulation": 4,  # Effective batch = 2*2*4 = 16
+                "lora_r": 32,  # Larger rank for more style capacity
+                "lora_alpha": 64,
+            })
+        else:
+            # Single GPU: conservative settings
+            params.update({
+                "batch_size": 1,
+                "num_layers": 16,
+                "iters": 600,
+                "max_seq_length": 1024,
+                "learning_rate": 1e-4,
+                "gradient_accumulation": 8,  # Effective batch = 8
+                "lora_r": 16,
+                "lora_alpha": 32,
+            })
+    elif per_gpu_vram >= 20:
         params.update({
-            "batch_size": 1,  # 70B model needs batch_size=1
+            "batch_size": 1,
             "num_layers": 16,
-            "iters": 1000,
-            "max_seq_length": 1024,  # Reduced for memory
-            "gradient_accumulation": 8,  # Effective batch = 8
+            "iters": 600,
+            "max_seq_length": 768,
+            "learning_rate": 1e-4,
+            "gradient_accumulation": 8,
+            "lora_r": 16,
+            "lora_alpha": 32,
         })
-    elif vram >= 32:
-        params.update({
-            "batch_size": 2,
-            "num_layers": 16,
-            "iters": 1000,
-            "max_seq_length": 1536,
-            "gradient_accumulation": 4,
-        })
-    elif vram >= 16:
+    elif per_gpu_vram >= 16:
         params.update({
             "batch_size": 2,
             "num_layers": 8,
             "iters": 500,
-            "max_seq_length": 1024,
+            "max_seq_length": 1536,
+            "learning_rate": 1e-4,
             "gradient_accumulation": 4,
+            "lora_r": 16,
+            "lora_alpha": 32,
         })
-    elif vram >= 8:
+    elif per_gpu_vram >= 8:
         params.update({
             "batch_size": 1,
             "num_layers": 4,
             "iters": 400,
-            "max_seq_length": 768,
+            "max_seq_length": 1024,
+            "learning_rate": 2e-4,
             "gradient_accumulation": 8,
+            "lora_r": 8,
+            "lora_alpha": 16,
         })
 
     return params
@@ -608,8 +681,9 @@ def print_system_info(info: SystemInfo):
                 if info.use_deepspeed:
                     print(f"{'Multi-GPU Mode:':<25} DeepSpeed ZeRO-3 (for 70B+ models)")
                 else:
-                    print(f"{'Multi-GPU Mode:':<25} Single GPU with QLoRA (stable)")
-                    print(f"{'Note:':<25} Use --deepspeed for 70B+ models")
+                    print(f"{'Multi-GPU Mode:':<25} DDP (Data Distributed Parallel)")
+                    print(f"{'VRAM per GPU:':<25} {info.gpu_vram_gb / info.gpu_count:.1f} GB")
+                    print(f"{'Note:':<25} Each GPU loads full model, processes own batch")
     else:
         print("No GPU detected - will use CPU (slow)")
 
@@ -626,11 +700,15 @@ def print_system_info(info: SystemInfo):
 
     params = get_training_params(info, info.recommended_model_tier)
     print(f"\n{'Training Parameters:'}")
-    print(f"  {'batch_size:':<20} {params['batch_size']}")
-    print(f"  {'num_layers:':<20} {params['num_layers']}")
-    print(f"  {'iters:':<20} {params['iters']}")
+    print(f"  {'batch_size:':<20} {params['batch_size']} (per GPU)")
+    print(f"  {'gradient_accum:':<20} {params['gradient_accumulation']}")
+    gpu_count = max(1, info.gpu_count) if info.gpu_count else 1
+    effective_batch = params['batch_size'] * gpu_count * params['gradient_accumulation']
+    print(f"  {'effective_batch:':<20} {effective_batch} ({params['batch_size']}x{gpu_count}GPUx{params['gradient_accumulation']})")
     print(f"  {'max_seq_length:':<20} {params['max_seq_length']}")
     print(f"  {'learning_rate:':<20} {params['learning_rate']}")
+    print(f"  {'lora_r:':<20} {params.get('lora_r', 16)}")
+    print(f"  {'lora_alpha:':<20} {params.get('lora_alpha', 32)}")
 
 
 def print_model_options():
@@ -798,28 +876,31 @@ def run_training(info: SystemInfo, args):
     print(f"\nBackend: {backend.upper()}")
     print(f"Model: {model_id}")
     print(f"Parameters: batch_size={params['batch_size']}, layers={params['num_layers']}, iters={params['iters']}")
+    if args.style_enhanced:
+        print(f"Mode: Style-Enhanced (rank=32, alpha=64, max_len=4096, context-window data)")
 
     # Check if this is a large model that needs DeepSpeed on multi-GPU
-    is_large_model = any(x in model_id.lower() for x in ["70b", "72b", "65b", "large"])
-    use_deepspeed = args.deepspeed if hasattr(args, 'deepspeed') else False
+    is_large_model = is_large_model_name(model_id)
+    use_deepspeed = bool(args.deepspeed)
+    if args.no_deepspeed:
+        use_deepspeed = False
 
-    # For large models on multi-GPU, require explicit --deepspeed flag
+    # For large models on multi-GPU, default to DeepSpeed unless explicitly disabled
     if is_large_model and info.gpu_count > 1 and backend == "cuda":
-        if not use_deepspeed:
+        if not use_deepspeed and not args.no_deepspeed:
+            use_deepspeed = True
+            print(f"\nAuto-enabling DeepSpeed ZeRO-3 for {info.gpu_count}-GPU large model training")
+        elif args.no_deepspeed:
             print(f"\n" + "=" * 70)
-            print("WARNING: Large Model on Multi-GPU")
+            print("WARNING: Large Model on Multi-GPU Without DeepSpeed")
             print("=" * 70)
             print(f"\nModel: {model_id}")
-            print(f"GPUs: {info.gpu_count}")
-            print("\n70B+ models require DeepSpeed ZeRO-3 for multi-GPU training.")
-            print("QLoRA with device_map is unstable for large models.")
-            print("\nOptions:")
-            print("  1. Add --deepspeed flag to use DeepSpeed ZeRO-3")
-            print("  2. Use a smaller model (recommended): --model mistral")
-            print("\nNote: DeepSpeed requires matching CUDA versions.")
-            print("      If you encounter build errors, use a smaller model.")
-            return False
-        print(f"\nUsing DeepSpeed ZeRO-3 for {info.gpu_count}-GPU 70B+ training")
+            print(f"GPUs: {info.gpu_count} (Total VRAM: {info.gpu_vram_gb:.1f} GB)")
+            print("\nUsing single-GPU QLoRA mode for stability.")
+            print("If training hangs or OOM occurs, use --deepspeed instead.")
+
+        if use_deepspeed:
+            print(f"\nUsing DeepSpeed ZeRO-3 for {info.gpu_count}-GPU large model training")
 
     # Run appropriate training script
     if backend == "mlx":
@@ -863,35 +944,87 @@ def run_mlx_training(model_id: str, params: dict, args) -> bool:
 
 
 def run_lora_training(model_id: str, params: dict, args, backend: str) -> bool:
-    """Run LoRA/QLoRA training on Linux/Windows (single GPU or safe mode)."""
+    """Run LoRA/QLoRA training on Linux/Windows.
+
+    For multi-GPU setups, uses accelerate DDP (Data Distributed Parallel):
+    - Each GPU loads the full 4-bit model (~7GB each)
+    - Each GPU processes its own batch independently
+    - Gradients synchronized across GPUs via all-reduce
+    - ~2x speedup with 2 GPUs (linear scaling)
+    """
     script = SCRIPT_DIR / "finetune_lora.py"
 
     # Determine quantization based on VRAM
     quantize = "4bit" if backend == "cuda" else "8bit"
 
-    cmd = [
-        sys.executable, str(script),
+    # Detect GPU count for DDP
+    gpu_count = 1
+    if backend == "cuda":
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True, text=True
+            )
+            if result.returncode == 0:
+                gpu_count = len(result.stdout.strip().split("\n"))
+        except Exception:
+            pass
+
+    # Build training script arguments
+    script_args = [
+        str(script),
         "--model", model_id,
         "--batch-size", str(params["batch_size"]),
         "--epochs", str(max(1, params["iters"] // 200)),  # Convert iters to epochs
         "--max-length", str(params["max_seq_length"]),
         "--learning-rate", str(params["learning_rate"]),
         "--quantize", quantize,
-        "--gradient-accumulation", str(params["gradient_accumulation"]),
+        "--gradient-accumulation-steps", str(params["gradient_accumulation"]),
+        "--lora-r", str(params.get("lora_r", 16)),
+        "--lora-alpha", str(params.get("lora_alpha", 32)),
+        "--disable-tqdm",
     ]
 
     if backend == "cpu":
-        cmd.append("--cpu")
+        script_args.append("--cpu")
+
+    if args.style_enhanced:
+        script_args.append("--style-enhanced")
+
+    # Build full command: accelerate for multi-GPU DDP, python for single GPU
+    env = os.environ.copy()
+
+    if backend == "cuda" and gpu_count > 1:
+        # Multi-GPU DDP via accelerate
+        cmd = [
+            "accelerate", "launch",
+            "--num_processes", str(gpu_count),
+            "--num_machines", "1",
+            "--mixed_precision", "no",  # QLoRA handles precision via quantization config
+            "--dynamo_backend", "no",
+            "--multi_gpu",
+        ] + script_args
+        # NCCL P2P must be disabled for GPUs without NVLink (causes hangs)
+        env["NCCL_P2P_DISABLE"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
+        print(f"\n  Using DDP with {gpu_count} GPUs (accelerate launch)")
+        print(f"  Each GPU processes batch_size={params['batch_size']} independently")
+        effective_batch = params["batch_size"] * gpu_count * params["gradient_accumulation"]
+        print(f"  Effective batch size: {params['batch_size']} x {gpu_count} GPUs x {params['gradient_accumulation']} grad_accum = {effective_batch}")
+    else:
+        cmd = [sys.executable] + script_args
+        if backend == "cuda":
+            print(f"\n  Using single GPU")
 
     if args.dry_run:
         print(f"\n[DRY RUN] Would execute:")
         print(f"  {' '.join(cmd)}")
         return True
 
-    print(f"\nExecuting: {' '.join(cmd[:4])}...")
+    print(f"\nExecuting: {' '.join(cmd[:6])}...")
 
     try:
-        result = subprocess.run(cmd)
+        result = subprocess.run(cmd, env=env)
         return result.returncode == 0
     except KeyboardInterrupt:
         print("\n\nTraining interrupted by user.")
@@ -998,10 +1131,16 @@ Examples:
   # Run in background (tmux) - survives terminal close
   python scripts/smart_finetune.py --background
   python scripts/smart_finetune.py --model llama3.3 --deepspeed --background
+  python scripts/smart_finetune.py --model llama3.3 --no-deepspeed --background
+  python scripts/smart_finetune.py --background --log-file logs/finetune.log
 
   # Skip confirmation prompts (for scripts/automation)
   python scripts/smart_finetune.py --yes
   python scripts/smart_finetune.py --model mistral -y --background
+
+  # Style-enhanced mode (multi-paragraph context, larger LoRA rank)
+  python scripts/smart_finetune.py --style-enhanced
+  python scripts/smart_finetune.py --style-enhanced --model mistral-nemo --background
 
 Available model shortcuts (ungated, no login needed):
   mistral, mistral-large, mistral-nemo, qwen, qwen-14b, phi
@@ -1024,16 +1163,28 @@ Gated models (require HuggingFace login + Meta approval):
                         help="Force specific model (overrides auto-detection)")
     parser.add_argument("--deepspeed", action="store_true",
                         help="Force DeepSpeed ZeRO-3 for multi-GPU training")
+    parser.add_argument("--no-deepspeed", action="store_true",
+                        help="Disable automatic DeepSpeed for large multi-GPU models")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be executed without running")
     parser.add_argument("--background", "-bg", action="store_true",
                         help="Run training in tmux session (survives terminal close)")
+    parser.add_argument("--log-file", type=str, default=None,
+                        help="Log file path (background mode only)")
     parser.add_argument("--yes", "-y", action="store_true",
                         help="Skip confirmation prompts")
+    parser.add_argument("--style-enhanced", action="store_true",
+                        help="Style-enhanced mode: larger LoRA rank (32), longer context (4096), "
+                             "uses multi-paragraph context-window training data for better "
+                             "transition/argument/style learning")
 
     args = parser.parse_args()
 
     # Handle --background mode first (before any other processing)
+    if args.background and not args.log_file:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        args.log_file = str(PROJECT_ROOT / "logs" / f"finetune-background-{timestamp}.log")
+
     if args.background:
         return launch_in_tmux(args)
 
@@ -1060,8 +1211,15 @@ Gated models (require HuggingFace login + Meta approval):
         return 0
 
     # Update deepspeed flag from args before printing
-    if args.deepspeed:
-        info.use_deepspeed = True
+    use_deepspeed_hint = bool(args.deepspeed)
+    if args.no_deepspeed:
+        use_deepspeed_hint = False
+    elif info.gpu_type == "nvidia" and info.gpu_count > 1:
+        model_hint = args.model or ("tier_0" if info.recommended_model_tier == "tier_0" else "")
+        if model_hint and is_large_model_name(model_hint):
+            use_deepspeed_hint = True
+
+    info.use_deepspeed = use_deepspeed_hint
 
     # Print system info
     print_system_info(info)
@@ -1113,10 +1271,29 @@ Gated models (require HuggingFace login + Meta approval):
         print("\n" + "=" * 70)
         print("Training Complete!")
         print("=" * 70)
+
+        # Find latest model directory from registry
+        registry_file = Path("models/registry.json")
+        latest_dir = None
+        if registry_file.exists():
+            try:
+                with open(registry_file) as f:
+                    registry = json.load(f)
+                if registry.get("latest"):
+                    latest_dir = Path("models") / registry["latest"]
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+        if latest_dir and latest_dir.exists():
+            param_dir = latest_dir / "Parameter_Tuning"
+            print(f"\n  Model: {latest_dir}")
+            if param_dir.exists():
+                print(f"  Plots: {param_dir}/")
+
         print("\nNext steps:")
-        print("  1. Check models/ directory for the trained model")
-        print("  2. Follow the instructions to create an Ollama model")
-        print("  3. Update .env and run: make run")
+        print("  1. View training plots in models/<your-model>/Parameter_Tuning/")
+        print("  2. Evaluate model: python scripts/evaluate_model.py models/<your-model>/")
+        print("  3. Compare runs: python scripts/plot_training.py models/gswa-lora-*/")
         return 0
     else:
         print("\n" + "=" * 70)

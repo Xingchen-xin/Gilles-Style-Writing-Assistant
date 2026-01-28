@@ -14,64 +14,210 @@
             <div id="health-status" class="health-badge">Checking...</div>
         </header>
 
+        <!-- Tab Navigation -->
+        <nav class="tab-nav">
+            <button class="tab-btn active" data-tab="rewrite">Rewrite</button>
+            <button class="tab-btn" data-tab="evaluate">Style Analysis</button>
+            <button class="tab-btn" data-tab="stats">Feedback Stats</button>
+        </nav>
+
         <main>
-            <div class="input-section">
-                <label for="input-text">Paste your paragraph:</label>
-                <textarea
-                    id="input-text"
-                    placeholder="Enter the paragraph you want to rewrite..."
-                    rows="8"
-                ></textarea>
+            <!-- Tab: Rewrite -->
+            <div id="tab-rewrite" class="tab-content active">
+                <div class="input-section">
+                    <label for="input-text">Paste your paragraph:</label>
+                    <textarea
+                        id="input-text"
+                        placeholder="Enter the scientific text you want to rewrite in Gilles's style..."
+                        rows="8"
+                    ></textarea>
 
-                <div class="options">
-                    <div class="option-group">
-                        <label for="section">Section:</label>
-                        <select id="section">
-                            <option value="">Auto-detect</option>
-                            <option value="Abstract">Abstract</option>
-                            <option value="Introduction">Introduction</option>
-                            <option value="Methods">Methods</option>
-                            <option value="Results">Results</option>
-                            <option value="Discussion">Discussion</option>
-                            <option value="Conclusion">Conclusion</option>
-                        </select>
+                    <div class="options">
+                        <div class="option-group model-option">
+                            <label for="model-select">Model:</label>
+                            <select id="model-select">
+                                <option value="">Default (base model)</option>
+                            </select>
+                            <div id="model-info" class="model-info-box hidden"></div>
+                        </div>
+
+                        <div class="option-group">
+                            <label for="section">Section:</label>
+                            <select id="section">
+                                <option value="">Auto-detect</option>
+                                <option value="Abstract">Abstract</option>
+                                <option value="Introduction">Introduction</option>
+                                <option value="Methods">Methods</option>
+                                <option value="Results">Results</option>
+                                <option value="Discussion">Discussion</option>
+                                <option value="Conclusion">Conclusion</option>
+                            </select>
+                        </div>
+
+                        <div class="option-group">
+                            <label for="n-variants">Variants:</label>
+                            <select id="n-variants">
+                                <option value="3">3</option>
+                                <option value="4">4</option>
+                                <option value="5">5</option>
+                            </select>
+                        </div>
                     </div>
 
-                    <div class="option-group">
-                        <label for="n-variants">Variants:</label>
-                        <select id="n-variants">
-                            <option value="3">3</option>
-                            <option value="4">4</option>
-                            <option value="5">5</option>
-                        </select>
+                    <button id="generate-btn" class="primary-btn">
+                        Generate Variants
+                    </button>
+                </div>
+
+                <div id="results-section" class="results-section hidden">
+                    <h2>Generated Variants</h2>
+                    <div id="variants-container"></div>
+                    <div id="meta-info" class="meta-info"></div>
+                </div>
+
+                <div id="loading" class="loading hidden">
+                    <div class="spinner"></div>
+                    <div class="progress-track">
+                        <div id="progress-bar" class="progress-bar"></div>
+                    </div>
+                    <p id="progress-text" class="progress-text">Generating variants...</p>
+                    <p id="progress-subtext" class="progress-subtext"></p>
+                </div>
+
+                <div id="error" class="error hidden"></div>
+            </div>
+
+            <!-- Tab: Style Analysis -->
+            <div id="tab-evaluate" class="tab-content">
+                <div class="input-section">
+                    <label for="eval-text">Paste text to analyze style:</label>
+                    <textarea
+                        id="eval-text"
+                        placeholder="Paste any text to analyze how well it matches Gilles's writing style..."
+                        rows="8"
+                    ></textarea>
+
+                    <div class="analyze-buttons">
+                        <button id="analyze-btn" class="primary-btn">
+                            Quick Analysis
+                        </button>
+                        <button id="model-analyze-btn" class="primary-btn model-btn">
+                            AI Analysis (requires vLLM)
+                        </button>
+                    </div>
+                    <p class="analyze-hint">Quick Analysis uses rule-based metrics. AI Analysis uses the LLM for deeper style evaluation.</p>
+                </div>
+
+                <div id="analysis-results" class="analysis-results hidden">
+                    <h2>Style Analysis Results</h2>
+
+                    <div class="style-score-card">
+                        <div class="score-circle" id="style-score-circle">
+                            <span id="style-score-value">--</span>
+                        </div>
+                        <div class="score-label">Style Match Score</div>
+                    </div>
+
+                    <div class="metrics-grid">
+                        <div class="metric-card">
+                            <div class="metric-title">Sentence Length</div>
+                            <div class="metric-value" id="metric-sent-len">--</div>
+                            <div class="metric-target">Target: 20-30 words</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-title">Discourse Markers</div>
+                            <div class="metric-value" id="metric-discourse">--</div>
+                            <div class="metric-target">Target: >0.5% density</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-title">Subordination</div>
+                            <div class="metric-value" id="metric-subordination">--</div>
+                            <div class="metric-target">Target: >3% density</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-title">Academic Hedging</div>
+                            <div class="metric-value" id="metric-hedging">--</div>
+                            <div class="metric-target">Target: 0.5-2% density</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-title">Precision Markers</div>
+                            <div class="metric-value" id="metric-precision">--</div>
+                            <div class="metric-target">Target: >0.2% density</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-title">Transition Phrases</div>
+                            <div class="metric-value" id="metric-transitions">--</div>
+                            <div class="metric-target">Target: 1+ per paragraph</div>
+                        </div>
+                    </div>
+
+                    <div class="markers-found" id="markers-found">
+                        <h3>Detected Style Markers</h3>
+                        <div class="marker-tags" id="marker-tags"></div>
                     </div>
                 </div>
 
-                <button id="generate-btn" class="primary-btn">
-                    Generate Variants
-                </button>
-            </div>
-
-            <div id="results-section" class="results-section hidden">
-                <h2>Generated Variants</h2>
-                <div id="variants-container"></div>
-                <div id="meta-info" class="meta-info"></div>
-            </div>
-
-            <div id="loading" class="loading hidden">
-                <div class="spinner"></div>
-                <div class="progress-track">
-                    <div id="progress-bar" class="progress-bar"></div>
+                <div id="analysis-loading" class="loading hidden">
+                    <div class="spinner"></div>
+                    <p>Analyzing style...</p>
                 </div>
-                <p id="progress-text" class="progress-text">Generating variants...</p>
-                <p id="progress-subtext" class="progress-subtext"></p>
             </div>
 
-            <div id="error" class="error hidden"></div>
+            <!-- Tab: Feedback Stats -->
+            <div id="tab-stats" class="tab-content">
+                <div class="stats-section">
+                    <h2>Feedback Collection Statistics</h2>
+                    <p class="stats-description">
+                        User feedback is collected to improve the model through DPO (Direct Preference Optimization) training.
+                        Rate generated variants as Best/Good/Bad or Edit them to create high-quality training data.
+                    </p>
+
+                    <div id="stats-container" class="stats-grid">
+                        <div class="stat-card">
+                            <div class="stat-value" id="stat-sessions">--</div>
+                            <div class="stat-label">Total Sessions</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="stat-variants">--</div>
+                            <div class="stat-label">Variants Rated</div>
+                        </div>
+                        <div class="stat-card best">
+                            <div class="stat-value" id="stat-best">--</div>
+                            <div class="stat-label">Marked Best</div>
+                        </div>
+                        <div class="stat-card good">
+                            <div class="stat-value" id="stat-good">--</div>
+                            <div class="stat-label">Marked Good</div>
+                        </div>
+                        <div class="stat-card bad">
+                            <div class="stat-value" id="stat-bad">--</div>
+                            <div class="stat-label">Marked Bad</div>
+                        </div>
+                        <div class="stat-card edited">
+                            <div class="stat-value" id="stat-edited">--</div>
+                            <div class="stat-label">User Edited</div>
+                        </div>
+                    </div>
+
+                    <button id="refresh-stats-btn" class="secondary-btn">
+                        Refresh Statistics
+                    </button>
+
+                    <div class="export-section">
+                        <h3>Export for Training</h3>
+                        <p>Export collected feedback in DPO format for model fine-tuning.</p>
+                        <button id="export-dpo-btn" class="primary-btn">
+                            Export DPO Training Data
+                        </button>
+                        <div id="export-status" class="export-status"></div>
+                    </div>
+                </div>
+            </div>
         </main>
 
         <footer>
-            <p>GSWA - Fully offline scientific paper rewriter</p>
+            <p>GSWA - Scientific Paper Style Transfer Assistant</p>
+            <p class="footer-note">Feedback collected through this app improves future model versions</p>
         </footer>
     </div>
 

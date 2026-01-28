@@ -149,25 +149,33 @@ make train-linux-safe
 | 16GB | **Mistral 7B** | batch=2, seq=1536, 4bit | RTX 4080, A4000 |
 | 24GB | Mistral Nemo 12B | batch=4, seq=2048, 4bit | RTX 3090, RTX 4090, A5000 |
 | 48GB | Mistral Large | batch=8, seq=2048, no quant | A6000, A40 |
-| 64GB+ (multi-GPU) | Mistral 7B (default) | QLoRA single GPU | 2x RTX 5000 Ada |
-| 64GB+ + DeepSpeed | Llama 3.3 70B | ZeRO-3, batch=1 | 2x RTX 5000 Ada |
+| 32GB+ (multi-GPU) | Mistral Nemo 12B | QLoRA single GPU | 2x RTX 5000 Ada |
+| 60GB+ (multi-GPU) | Llama 3.3 70B (default) | DeepSpeed ZeRO-3 | 2x RTX 5000 Ada |
 
 ### Multi-GPU Training
 
-For multi-GPU setups, the system defaults to **Mistral 7B with single-GPU QLoRA** for stability.
+For multi-GPU setups:
+- **7B-14B models**: Uses **DDP (Data Distributed Parallel)** via `accelerate launch`
+- **70B+ models**: Uses **DeepSpeed ZeRO-3** with CPU offloading
 
-**Why not use all GPUs?**
-- `device_map="auto"` is **inference-style sharding** - doesn't handle gradient sync properly
-- QLoRA + device_map + multi-GPU = **unstable** (CUDA assertion errors)
-- Single GPU with QLoRA is stable and efficient for 7B-14B models
+**DDP for 7B-14B models (2+ GPUs):**
+- Each GPU loads a full copy of the model (QLoRA 4-bit fits in ~22GB per GPU)
+- Data is split across GPUs, gradients are synchronized via all-reduce
+- Gives ~1.6x speedup with 2 GPUs, allows larger batch size and LoRA rank
+- Requires `NCCL_P2P_DISABLE=1` on non-NVLink systems (handled automatically)
+
+**Important: Never use `device_map="auto"` for training:**
+- `device_map="auto"` is **inference-style pipeline parallelism** - doesn't handle gradient sync
+- QLoRA + device_map + multi-GPU = **CUDA assertion errors**
+- DDP is the correct approach for multi-GPU training
 
 ```bash
-# Default: Mistral 7B on single GPU (stable)
+# Default: Auto picks model and GPU strategy
 make finetune-smart
 
 # Or specify model explicitly
 python scripts/smart_finetune.py --model mistral
-python scripts/smart_finetune.py --model mistral-nemo  # 12B
+python scripts/smart_finetune.py --model mistral-nemo  # 12B, DDP with 2 GPUs
 ```
 
 ### Background Training (Recommended for Long Runs)
@@ -175,12 +183,16 @@ python scripts/smart_finetune.py --model mistral-nemo  # 12B
 训练大模型需要数小时，建议使用后台模式防止终端关闭导致中断：
 
 ```bash
-# 一键后台训练 (使用 tmux)
+# 一键后台训练 (使用 tmux，自动写日志)
 make finetune-background
+
+# 指定模型 + DeepSpeed + 日志
+make finetune-background MODEL=llama3.3 DEEPSPEED=1 LOG=logs/llama3.3-deepspeed.log
 
 # 或手动指定参数
 python scripts/smart_finetune.py --background
 python scripts/smart_finetune.py --model llama3.3 --deepspeed --background
+python scripts/smart_finetune.py --model llama3.3 --no-deepspeed --background
 
 # 跳过确认提示 (适合脚本/自动化)
 python scripts/smart_finetune.py --model mistral -y --background
@@ -202,11 +214,17 @@ tmux list-sessions
 
 **注意：** 需要安装 tmux (`apt install tmux` 或 `yum install tmux`)
 
+**如果日志里一直显示 0%**（tqdm 不刷新）：
+```bash
+python scripts/finetune_lora.py --disable-tqdm --log-every 1
+```
+
 ---
 
 ### 70B+ Models (Advanced)
 
-For 70B+ models on multi-GPU, you need **DeepSpeed ZeRO-3**:
+For 70B+ models on multi-GPU, you need **DeepSpeed ZeRO-3**.
+`smart_finetune.py` will auto-enable DeepSpeed unless you pass `--no-deepspeed`.
 
 **Requirements:**
 - 2+ GPUs with total 60GB+ VRAM
@@ -524,6 +542,68 @@ Loss: 1.234 - 2.567
 
 ---
 
+## Post-Training Visualization (CUDA/Transformers)
+
+After training with `finetune_lora.py` or `smart_finetune.py`, plots are automatically
+generated in the `Parameter_Tuning/` folder of the model output directory.
+
+### Output Structure
+
+```
+models/gswa-lora-Mistral-20260123-012408/
+├── Parameter_Tuning/
+│   ├── loss_curve.png          # Train + eval loss with hyperparameter annotations
+│   ├── learning_rate.png       # LR schedule (warmup + cosine decay)
+│   ├── grad_norm.png           # Gradient norms over training
+│   ├── training_summary.png    # Combined 2x2 grid of all metrics
+│   └── training_report.txt     # Text summary with loss stats
+├── training_metrics.json       # Complete training log_history
+├── training_config.json        # Hyperparameters used
+└── checkpoint-*/
+    └── trainer_state.json      # HuggingFace Trainer state
+```
+
+### Manual Visualization
+
+```bash
+# Generate plots for a completed training run
+make visualize MODEL_DIR=models/gswa-lora-Mistral-20260123-012408
+
+# Or directly:
+python scripts/plot_training.py models/gswa-lora-Mistral-20260123-012408/
+
+# Compare multiple runs (overlaid loss curves)
+make compare-runs
+# Or: python scripts/plot_training.py models/gswa-lora-*/ --compare
+```
+
+### Model Evaluation
+
+Generate text samples to assess style quality:
+
+```bash
+# Quick evaluation (5 samples from validation set)
+make evaluate MODEL_DIR=models/gswa-lora-Mistral-20260123-012408
+
+# More samples with custom settings
+python scripts/evaluate_model.py models/gswa-lora-Mistral-20260123-012408/ \
+    --num-samples 10 --max-new-tokens 512
+
+# Custom prompts
+python scripts/evaluate_model.py models/gswa-lora-Mistral-20260123-012408/ \
+    --prompts-file my_prompts.jsonl
+```
+
+### Interpreting Results
+
+- **Loss Curve**: Train loss should decrease smoothly. If eval loss diverges upward while train loss continues dropping, the model is overfitting.
+- **Train-Eval Gap**: Gap < 0.15 = good generalization; Gap > 0.3 = likely overfitting (try fewer epochs or more data)
+- **Learning Rate**: Verify warmup phase (~10% of training) and smooth cosine decay
+- **Gradient Norm**: Spikes indicate instability. Consistent growth may indicate exploding gradients (reduce LR).
+- **Comparison Plots**: Lower final eval loss generally indicates better generalization.
+
+---
+
 ## Common Issues and Solutions
 
 ### Issue 1: `Insufficient Memory` / OOM
@@ -563,47 +643,180 @@ The fallback system handles this automatically by reducing eval_batch_size first
 
 ---
 
-## Complete Workflow
+## Complete Workflow (Style Transfer Training)
 
-### 1. Prepare Corpus
-```bash
-# Place files in data/corpus/raw/
-# Priority files in data/corpus/raw/important_examples/
+GSWA 的训练采用 **style-transfer pair** 方法：使用本地 LLM 生成 Gilles 原始段落的"通用"版本，
+然后训练模型学习从通用学术英语转换为 Gilles 风格。
+
+### 训练数据格式
+
+每条训练数据的结构（使用模型原生 chat template）：
+
+```
+<s>[INST]Rewrite the following scientific paragraph in a clear, precise academic style:
+
+<通用学术英文版本>[/INST]<Gilles 原始风格文本></s>
 ```
 
-### 2. Parse and Prepare
+- `[INST]...[/INST]` 部分：instruction + input（被 mask，不参与 loss 计算）
+- `[/INST]` 之后的部分：response（模型实际学习生成的部分）
+
+### Step 1: 准备语料库
+
 ```bash
+# 放入 Gilles 的论文 (PDF/DOCX/TXT)
+data/corpus/raw/                      <- 普通文章
+data/corpus/raw/important_examples/   <- 重要文章 (2.5x 权重)
+
+# 解析语料库
 make parse-corpus
+```
+
+### Step 2: 生成 Style-Transfer Pairs
+
+这一步使用本地 LLM (ollama) 将 Gilles 的每个段落生成一个"通用"版本。
+支持断点续传（可随时中断并重新运行）。
+
+```bash
+# 使用 qwen3-coder:30b (推荐，速度快)
+make generate-pairs OLLAMA_MODEL=qwen3-coder:30b
+
+# 或使用 llama3:70b (质量更高，但慢 5 倍)
+make generate-pairs OLLAMA_MODEL=llama3:70b
+
+# 直接运行脚本（更多选项）
+python scripts/prepare_training_data.py --generate-pairs \
+    --ollama-model qwen3-coder:30b \
+    --max-para-length 1500
+
+# 监控进度
+tail -f /tmp/pair_generation.log  # 如果后台运行
+```
+
+**生成时间参考：**
+| 模型 | 速度 | 2968 段落预计时间 |
+|------|------|-------------------|
+| qwen3-coder:30b | ~5s/段落 | ~4 小时 |
+| llama3:70b | ~30s/段落 | ~25 小时 |
+
+**原理：** 长文本块会自动拆分为 100-1500 字符的独立段落。
+约 1134 个原始文本块 → 拆分后约 2968 个训练段落。
+
+### Step 3: 准备训练数据
+
+```bash
+# 从 style pairs 生成 Alpaca 格式训练数据
 make prepare-training
+
+# 或手动运行（带权重和验证集拆分）
+python scripts/prepare_training_data.py --format alpaca --weighted --split
 ```
 
-### 3. Train with Full Pipeline
+输出文件：
+- `data/training/alpaca_train.jsonl` - 训练集
+- `data/training/alpaca_val.jsonl` - 验证集
+
+**数据质量保障：** 脚本自动过滤以下内容：
+- **参考文献列表** (Reference sections) - 包含多个 "Author et al. (YYYY)" 模式的段落
+- **DOI 和文献条目** - 带有 "10.xxxx/xxx" 或 journal volume-page 格式的内容
+- **过短段落** - 少于 100 字符的片段
+
+过滤后训练数据中的参考文献内容 < 1%，确保模型学习写作风格而非记忆文献格式。
+
+### Step 4: 训练模型
+
 ```bash
-python -m gswa.train train \
-    --preprocess \
-    --auto-plan \
-    --name my-experiment
+# 一键智能训练（推荐，自动检测硬件和参数）
+make finetune-smart
+
+# 后台训练（长时间运行推荐）
+make finetune-background
+
+# 查看训练进度
+tmux attach -t gswa-training
 ```
 
-### 4. Review Results
-```bash
-# Open HTML report
-open runs/<your-run>/reports/report.html
+### Step 4b: 风格增强训练（Style-Enhanced Mode）
 
-# Or regenerate visualizations
-python -m gswa.train visualize --run-dir runs/<your-run>
+标准训练（Step 4）使用单段落对学习基本词汇和句法风格。风格增强模式额外学习：
+- **转折模式** (transition patterns) - 段间过渡和话语标记词
+- **论证思路** (argument structure) - 跨段落逻辑推进
+- **铺垫手法** (foreshadowing) - 设悬-揭示模式
+
+```bash
+# 一键风格增强训练（自动生成多段落训练数据 + 大LoRA rank训练）
+make finetune-style-enhanced
+
+# 后台运行
+make finetune-style-enhanced-bg
+
+# 或分步执行：
+# 1. 生成多段落上下文窗口训练数据
+python scripts/prepare_training_data.py --format context-window --section-aware --split
+
+# 2. 用风格增强模式训练
+python scripts/smart_finetune.py --style-enhanced
+python scripts/smart_finetune.py --style-enhanced --model mistral-nemo --background
 ```
 
-### 5. Create Ollama Model
+**风格增强模式与标准模式的区别：**
+
+| 参数 | 标准模式 | 风格增强模式 |
+|------|---------|-------------|
+| LoRA rank | 16 | 32 |
+| LoRA alpha | 32 | 64 |
+| Max序列长度 | 1024-2048 | 4096 |
+| 训练轮数 | 3 | 4 |
+| 训练数据 | 单段落对 | 多段落上下文窗口（默认3段） |
+| Section标签 | 无 | 自动检测并加入prompt |
+| 学习维度 | 用词+句法 | 用词+句法+转折+部分思路 |
+
+**自定义上下文窗口大小：**
 ```bash
-ollama create gswa-gilles -f runs/<your-run>/adapters/Modelfile
+# 使用2段落窗口（适合小数据集或VRAM不足）
+python scripts/prepare_training_data.py --format context-window --context-window 2 --section-aware --split
+
+# 使用5段落窗口（需要更多VRAM和更长训练）
+python scripts/prepare_training_data.py --format context-window --context-window 5 --section-aware --split
 ```
 
-### 6. Use the Model
+**注意：** 风格增强模式需要更多VRAM（max_length=4096），建议24GB+显存。如果OOM，减小context-window为2或降低batch_size。
+
+### Step 5: 评估和可视化
+
 ```bash
-echo 'VLLM_MODEL_NAME=gswa-gilles' >> .env
+# 查看训练曲线
+make visualize MODEL_DIR=models/gswa-lora-Mistral-<timestamp>
+
+# 生成样本评估风格质量
+make evaluate MODEL_DIR=models/gswa-lora-Mistral-<timestamp>
+
+# 多次训练对比
+make compare-runs
+```
+
+### Step 6: 使用模型
+
+```bash
+# 配置 .env 使用新模型
+LORA_ADAPTER_PATH=./models/gswa-lora-Mistral-<timestamp>
+
+# 启动服务
 make run
 ```
+
+### Label Masking 机制
+
+训练时只有 response 部分（Gilles 风格文本）参与 loss 计算：
+
+```
+Token:  <s> [INST] Rewrite...  generic_text [/INST] gilles_text </s>  [PAD]...
+Label:  -100  -100   -100...    -100         -100    token_ids   EOS   -100...
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^      ^^^^^^^^^^^^^^^^^^
+        masked (不参与训练)                            trainable (学习生成)
+```
+
+这确保模型的全部学习容量用于学习如何生成 Gilles 风格的文本。
 
 ---
 
@@ -649,6 +862,8 @@ pytest tests/test_training.py -v
 | `make train-info` | Show hardware info and recommendations |
 | `make finetune-lora` | LoRA training (auto-detect settings) |
 | `make finetune-smart` | Smart training (auto-selects backend) |
+| `make finetune-style-enhanced` | Style-enhanced (multi-paragraph, rank=32, 4096 context) |
+| `make finetune-style-enhanced-bg` | Style-enhanced in background (tmux) |
 | `make finetune-deepspeed` | DeepSpeed ZeRO-3 for multi-GPU 70B+ |
 | `make finetune-background` | Background training (tmux, survives terminal close) |
 | `make check-lora` | Check LoRA dependencies |
@@ -660,4 +875,5 @@ pytest tests/test_training.py -v
 | `make analyze-data` | Analyze training data for long sequences |
 | `make preprocess-data` | Preprocess data to split long sequences |
 | `make prepare-training` | Prepare training data from corpus |
+| `make prepare-style-enhanced` | Prepare multi-paragraph context-window data |
 | `make parse-corpus` | Parse corpus files (PDF/DOCX/TXT) |

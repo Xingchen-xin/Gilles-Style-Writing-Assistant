@@ -1,6 +1,6 @@
 # GSWA 快速参考 / Quick Reference
 
-## 一键操作 (One-Click Workflow)
+## 一键操作 (Complete Workflow)
 
 ```bash
 # Step 1: 安装 (Setup) - 只需运行一次
@@ -10,11 +10,24 @@ make setup-auto         # Mac (全自动)
 # Step 2: 激活环境 (Activate)
 micromamba activate gswa
 
-# Step 3: 训练 (Train)
+# Step 3: 准备数据 (Prepare) - 放入 Gilles 论文后运行
+make parse-corpus                                  # 解析 PDF/DOCX
+make generate-pairs OLLAMA_MODEL=qwen3-coder:30b   # 生成风格对 (~4小时,一次性)
+
+# Step 4: 训练 (Train)
 make finetune-smart     # 自动检测平台和硬件
 
-# Step 4: 运行 (Run)
-make run                # http://localhost:8080
+# Step 5: 评估 (Evaluate)
+make evaluate MODEL_DIR=models/gswa-lora-Mistral-<timestamp>
+make visualize MODEL_DIR=models/gswa-lora-Mistral-<timestamp>
+
+# Step 6: 运行 (Run)
+make serve              # 一键启动! vLLM + API + 登录保护
+                        # 默认账号: gilles / IBLGilles2026
+                        # 访问: http://<IP>:8080
+
+# 公网访问
+make tunnel             # 创建 Cloudflare 隧道 (任何地方访问)
 ```
 
 ---
@@ -43,10 +56,15 @@ micromamba activate gswa  # 只用 micromamba
 |------|------|
 | `make help` | 显示所有命令 |
 | `make train-info` | 查看硬件信息 |
+| `make parse-corpus` | 解析语料库 (PDF/DOCX/TXT) |
+| `make generate-pairs` | 生成风格转换对 (一次性, ~4小时) |
 | `make finetune-smart` | 一键训练 (自动选择后端) |
-| `make finetune-deepspeed` | 多卡70B+训练 (DeepSpeed) |
 | `make finetune-background` | **后台训练 (关闭终端不中断)** |
-| `make run` | 启动服务 |
+| `make visualize MODEL_DIR=...` | 训练曲线可视化 |
+| `make evaluate MODEL_DIR=...` | 生成样本评估 |
+| `make compare-runs` | 多次训练对比 |
+| `make serve` | **一键启动服务 (vLLM + API + 登录)** |
+| `make tunnel` | 创建公网隧道 (Cloudflare) |
 | `make test` | 运行测试 |
 
 ---
@@ -63,6 +81,28 @@ micromamba run -n gswa make run
 
 # 退出环境
 micromamba deactivate
+```
+
+---
+
+## 服务器部署 (Server Deployment)
+
+```bash
+# 一键启动 (带登录保护)
+make serve
+# 默认账号: gilles
+# 默认密码: IBLGilles2026
+# 访问: http://<服务器IP>:8080
+
+# 自定义账号密码
+make serve-secure USER=admin PASS=mypassword
+
+# 公网访问 (通过 Cloudflare 隧道)
+make tunnel
+# 会显示类似: https://xxx-xxx.trycloudflare.com
+
+# 无密码模式 (仅本地开发)
+make serve-noauth
 ```
 
 ---
@@ -93,17 +133,17 @@ make finetune-smart
 ### 多卡训练失败
 ```bash
 # 问题：多卡 QLoRA 可能不稳定
-# 解决：默认使用单卡模式 (Mistral 7B)
+# 解决：70B 默认 DeepSpeed，其他默认单卡
 
-# 推荐：使用默认设置 (Mistral 7B，稳定)
-make finetune-smart  # 自动选择 Mistral 7B
+# 推荐：使用默认设置 (自动选择)
+make finetune-smart
 
 # 或手动指定模型
 python scripts/smart_finetune.py --model mistral
 
-# 70B 模型需要 DeepSpeed (高级)
-# 注意：需要 CUDA 版本匹配
+# 70B 模型默认 DeepSpeed (注意 CUDA 版本匹配)
 python scripts/smart_finetune.py --model llama3.3 --deepspeed
+python scripts/smart_finetune.py --model llama3.3 --no-deepspeed  # 强制单卡
 ```
 
 ### 后台训练 (Background Training)
@@ -113,6 +153,9 @@ python scripts/smart_finetune.py --model llama3.3 --deepspeed
 
 # 一键后台训练
 make finetune-background
+
+# 指定模型 + DeepSpeed + 日志
+make finetune-background MODEL=llama3.3 DEEPSPEED=1 LOG=logs/llama3.3-deepspeed.log
 
 # 或手动指定参数
 python scripts/smart_finetune.py --model llama3.3 --deepspeed --background
@@ -133,9 +176,14 @@ tmux kill-session -t gswa-training
 
 | 用途 | 路径 |
 |------|------|
-| 语料文件 | `data/corpus/raw/` |
-| 重要语料 | `data/corpus/raw/important_examples/` |
-| 训练输出 | `runs/` 或 `models/` |
+| 语料文件 (PDF/DOCX) | `data/corpus/raw/` |
+| 重要语料 (2.5x 权重) | `data/corpus/raw/important_examples/` |
+| 解析后语料 | `data/corpus/parsed/corpus.jsonl` |
+| 风格转换对 | `data/training/style_pairs.jsonl` |
+| 训练数据 | `data/training/alpaca_train.jsonl` |
+| 模型输出 | `models/gswa-lora-*/` |
+| 训练曲线 | `models/gswa-lora-*/Parameter_Tuning/` |
+| 评估结果 | `models/gswa-lora-*/eval_results.txt` |
 | 配置文件 | `.env` |
 
 ---

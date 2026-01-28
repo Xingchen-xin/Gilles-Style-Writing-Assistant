@@ -457,6 +457,7 @@ def train_with_transformers(args):
         TrainingArguments,
         Trainer,
         BitsAndBytesConfig,
+        TrainerCallback,
     )
     from peft import (
         LoraConfig,
@@ -466,14 +467,21 @@ def train_with_transformers(args):
     )
     from datasets import load_dataset
 
-    print("\n" + "=" * 60)
-    print("GSWA LoRA Fine-tuning")
-    print("=" * 60)
+    # Determine DDP rank early to suppress duplicate output from workers
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    gpu_count = torch.cuda.device_count()
+    is_main = local_rank <= 0  # True for rank 0 (DDP main) or -1 (non-DDP)
+
+    if is_main:
+        print("\n" + "=" * 60)
+        print("GSWA LoRA Fine-tuning")
+        print("=" * 60)
 
     # Setup quantization if requested
     bnb_config = None
     if args.quantize == "4bit":
-        print("\nUsing 4-bit quantization (QLoRA)")
+        if is_main:
+            print("\nUsing 4-bit quantization (QLoRA)")
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
@@ -481,12 +489,27 @@ def train_with_transformers(args):
             bnb_4bit_use_double_quant=True,
         )
     elif args.quantize == "8bit":
-        print("\nUsing 8-bit quantization")
+        if is_main:
+            print("\nUsing 8-bit quantization")
         bnb_config = BitsAndBytesConfig(load_in_8bit=True)
 
     # Load tokenizer
-    print(f"\nLoading tokenizer: {args.base_model}")
-    tokenizer = AutoTokenizer.from_pretrained(args.base_model)
+    if is_main:
+        print(f"\nLoading tokenizer: {args.base_model}")
+    tokenizer_kwargs = {"trust_remote_code": True}
+
+    # Suppress Mistral tokenizer warning and apply fix
+    if "mistral" in args.base_model.lower() or "nemo" in args.base_model.lower():
+        tokenizer_kwargs["fix_mistral_regex"] = True
+        if is_main:
+            print("  Applying Mistral tokenizer regex fix")
+        # Suppress the warning about incorrect regex pattern
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*incorrect regex pattern.*")
+            tokenizer = AutoTokenizer.from_pretrained(args.base_model, **tokenizer_kwargs)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(args.base_model, **tokenizer_kwargs)
 
     # Configure padding for training (right padding for causal LM)
     tokenizer.padding_side = "right"
@@ -495,58 +518,79 @@ def train_with_transformers(args):
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    print(f"  Vocab size: {len(tokenizer)}")
-    print(f"  Pad token: {tokenizer.pad_token} (id={tokenizer.pad_token_id})")
-    print(f"  EOS token: {tokenizer.eos_token} (id={tokenizer.eos_token_id})")
+    if is_main:
+        print(f"  Vocab size: {len(tokenizer)}")
+        print(f"  Pad token: {tokenizer.pad_token} (id={tokenizer.pad_token_id})")
+        print(f"  EOS token: {tokenizer.eos_token} (id={tokenizer.eos_token_id})")
 
     # Load model
-    print(f"Loading model: {args.base_model}")
+    if is_main:
+        print(f"Loading model: {args.base_model}")
 
-    # Determine device map
-    # Note: Multi-GPU QLoRA training has known issues with cross-device tensor operations
-    # For models that fit on a single GPU, use single GPU for stability
-    # For very large models (70B+), we need multi-GPU but it may require DeepSpeed/FSDP
-    gpu_count = torch.cuda.device_count()
-
-    # Estimate model size from name to decide device mapping
-    model_name_lower = args.base_model.lower()
-    is_large_model = any(x in model_name_lower for x in ["70b", "72b", "65b", "large"])
-
-    if gpu_count == 1 or not is_large_model:
-        # Single GPU or small enough model - use GPU 0
-        device_map = {"": 0}
-        print(f"  Using single GPU (device_map: {{'': 0}})")
+    # Determine device map for GPU assignment
+    # DDP mode: accelerate launch sets LOCAL_RANK, each process uses its own GPU
+    # Single mode: use GPU 0
+    if local_rank >= 0:
+        # Running under accelerate/torchrun DDP - each process uses its assigned GPU
+        device_map = {"": local_rank}
+        if local_rank == 0:
+            print(f"  DDP mode: {gpu_count} GPUs, NCCL P2P disabled for compatibility")
     else:
-        # Large model + multi-GPU: try auto but warn about potential issues
-        device_map = "auto"
-        print(f"  Using multi-GPU (device_map: auto) - Note: May have stability issues")
-        print(f"  If training fails, consider using a smaller model or DeepSpeed")
+        device_map = {"": 0}
+        if gpu_count > 1:
+            print(f"  Single GPU mode (use 'accelerate launch' for multi-GPU DDP)")
+        else:
+            print(f"  Using GPU 0")
 
     model = AutoModelForCausalLM.from_pretrained(
         args.base_model,
         quantization_config=bnb_config,
         device_map=device_map,
         trust_remote_code=True,
-        torch_dtype=torch.bfloat16 if bnb_config else None,
+        dtype=torch.bfloat16 if bnb_config else None,
     )
 
+    # DDP fix: remove hf_device_map so Trainer wraps model with DDP
+    # Without this, Trainer thinks model is in pipeline-parallel mode and skips DDP
+    if local_rank >= 0 and hasattr(model, "hf_device_map"):
+        del model.hf_device_map
+
+    # Prepare model for k-bit training with gradient checkpointing
+    # Gradient checkpointing saves memory by recomputing activations during backward pass
+    # For Mistral models, use_reentrant=True is required to avoid hanging
+    model_name_lower = args.base_model.lower()
+    use_reentrant = "mistral" in model_name_lower or "nemo" in model_name_lower
+    gc_kwargs = {"use_reentrant": use_reentrant}
+
     if bnb_config:
-        model = prepare_model_for_kbit_training(model)
+        model = prepare_model_for_kbit_training(
+            model,
+            use_gradient_checkpointing=True,
+            gradient_checkpointing_kwargs=gc_kwargs
+        )
+    else:
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gc_kwargs)
+        model.enable_input_require_grads()
+
+    if is_main:
+        print(f"  Gradient checkpointing enabled (reentrant={use_reentrant})")
 
     # Verify model vocab size matches tokenizer
     model_vocab_size = model.get_input_embeddings().weight.shape[0]
     tokenizer_vocab_size = len(tokenizer)
-    print(f"\n  Model vocab size: {model_vocab_size}")
-    print(f"  Tokenizer vocab size: {tokenizer_vocab_size}")
+    if is_main:
+        print(f"\n  Model vocab size: {model_vocab_size}")
+        print(f"  Tokenizer vocab size: {tokenizer_vocab_size}")
 
     # Note: Don't resize embeddings for quantized models - it can cause issues
     # The model vocab size should be >= tokenizer vocab size
-    if model_vocab_size < tokenizer_vocab_size:
+    if model_vocab_size < tokenizer_vocab_size and is_main:
         print(f"  WARNING: Model vocab ({model_vocab_size}) < tokenizer vocab ({tokenizer_vocab_size})")
         print(f"           Some tokens may cause errors. Consider using a different model.")
 
     # Configure LoRA
-    print(f"\nConfiguring LoRA (r={args.lora_r}, alpha={args.lora_alpha})")
+    if is_main:
+        print(f"\nConfiguring LoRA (r={args.lora_r}, alpha={args.lora_alpha})")
     lora_config = LoraConfig(
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
@@ -557,10 +601,12 @@ def train_with_transformers(args):
     )
 
     model = get_peft_model(model, lora_config)
-    model.print_trainable_parameters()
+    if is_main:
+        model.print_trainable_parameters()
 
     # Load and prepare dataset
-    print(f"\nLoading training data: {args.training_data}")
+    if is_main:
+        print(f"\nLoading training data: {args.training_data}")
 
     def load_jsonl(path):
         data = []
@@ -571,29 +617,55 @@ def train_with_transformers(args):
         return data
 
     raw_data = load_jsonl(args.training_data)
-    print(f"  Loaded {len(raw_data)} training examples")
+    if is_main:
+        print(f"  Loaded {len(raw_data)} training examples")
 
-    # Format for training
+    # Format for training using the model's native chat template
+    # This ensures training format matches inference format exactly
     def format_example(example):
         if "instruction" in example:
-            # Alpaca format
-            prompt = f"### Instruction:\n{example['instruction']}\n\n"
+            # Alpaca format → chat template
+            user_content = example['instruction']
             if example.get("input"):
-                prompt += f"### Input:\n{example['input']}\n\n"
-            prompt += f"### Response:\n{example['output']}"
+                user_content += f"\n\n{example['input']}"
+            response = example['output']
         elif "conversations" in example:
-            # ShareGPT format
+            # ShareGPT format → chat template
             conv = example["conversations"]
-            prompt = f"### Human:\n{conv[0]['value']}\n\n### Assistant:\n{conv[1]['value']}"
+            user_content = conv[0]['value']
+            response = conv[1]['value']
         elif "text" in example:
-            # Completion format
-            prompt = example["text"]
+            # Completion format - no chat template, train on everything
+            return {"text": example["text"], "prompt_prefix": ""}
         else:
-            prompt = str(example)
+            return {"text": str(example), "prompt_prefix": ""}
 
-        return {"text": prompt}
+        # Use the model's native chat template for consistent formatting
+        # Prompt prefix = everything up to the response (masked during training)
+        messages_prompt = [{"role": "user", "content": user_content}]
+        prompt_prefix = tokenizer.apply_chat_template(
+            messages_prompt, tokenize=False, add_generation_prompt=True
+        )
+
+        # Full text = prompt + response + EOS
+        messages_full = [
+            {"role": "user", "content": user_content},
+            {"role": "assistant", "content": response},
+        ]
+        full_text = tokenizer.apply_chat_template(
+            messages_full, tokenize=False, add_generation_prompt=False
+        )
+
+        return {"text": full_text, "prompt_prefix": prompt_prefix}
 
     formatted_data = [format_example(ex) for ex in raw_data]
+
+    if is_main:
+        # Show what the training format looks like
+        sample = formatted_data[0]
+        print(f"\n  Training format (native chat template):")
+        print(f"    Prompt prefix: {repr(sample['prompt_prefix'][:100])}...")
+        print(f"    Full text: {repr(sample['text'][:150])}...")
 
     # Create dataset
     from datasets import Dataset
@@ -604,24 +676,45 @@ def train_with_transformers(args):
     vocab_size = len(tokenizer)
 
     def tokenize_function(examples):
+        # Chat template text already includes <s> and </s> tokens,
+        # so we use add_special_tokens=False to avoid doubling them
         tokenized = tokenizer(
             examples["text"],
             truncation=True,
             max_length=args.max_length,
             padding="max_length",
+            add_special_tokens=False,
             return_tensors=None,  # Return lists, not tensors
         )
-        # Create labels: copy input_ids but set padding tokens to -100
-        # so they're ignored by the loss function
+
+        # Tokenize prompt prefixes to determine masking boundaries
+        # We mask instruction/input tokens so the model only trains on response tokens
+        prefix_lengths = []
+        for prefix in examples["prompt_prefix"]:
+            if prefix:
+                prefix_tokens = tokenizer(
+                    prefix,
+                    truncation=True,
+                    max_length=args.max_length,
+                    add_special_tokens=False,
+                    return_tensors=None,
+                )
+                prefix_lengths.append(len(prefix_tokens["input_ids"]))
+            else:
+                prefix_lengths.append(0)  # Completion format: no masking
+
+        # Create labels: mask prompt prefix and padding tokens to -100
         labels = []
-        for input_ids in tokenized["input_ids"]:
+        for idx, input_ids in enumerate(tokenized["input_ids"]):
+            prefix_len = prefix_lengths[idx]
             label = []
-            for token_id in input_ids:
-                if token_id == pad_token_id:
-                    label.append(-100)  # Ignore padding in loss
+            for pos, token_id in enumerate(input_ids):
+                if pos < prefix_len:
+                    label.append(-100)  # Mask instruction/input tokens
+                elif token_id == pad_token_id:
+                    label.append(-100)  # Mask padding
                 elif token_id >= vocab_size:
-                    # Safety check: if token exceeds vocab, mask it
-                    label.append(-100)
+                    label.append(-100)  # Safety: out-of-vocab
                 else:
                     label.append(token_id)
             labels.append(label)
@@ -629,52 +722,105 @@ def train_with_transformers(args):
         return tokenized
 
     # Disable caching to ensure fresh tokenization
-    print("\n  Tokenizing dataset (cache disabled)...")
+    if is_main:
+        print("\n  Tokenizing dataset with label masking (cache disabled)...")
+        print(f"  Only response tokens will contribute to loss (instruction/input masked)")
+    else:
+        # Suppress progress bars on worker processes
+        import datasets
+        datasets.disable_progress_bar()
+
     tokenized_dataset = dataset.map(
         tokenize_function,
         batched=True,
-        remove_columns=["text"],
+        remove_columns=["text", "prompt_prefix"],
         load_from_cache_file=False,  # Force re-tokenization
         desc="Tokenizing",
     )
 
     # Verify labels are correctly created
-    print(f"  Dataset columns: {tokenized_dataset.column_names}")
-    sample = tokenized_dataset[0]
-    num_masked = sum(1 for l in sample["labels"] if l == -100)
-    print(f"  Sample label stats: {len(sample['labels'])} tokens, {num_masked} masked (-100)")
+    if is_main:
+        print(f"  Dataset columns: {tokenized_dataset.column_names}")
+        sample = tokenized_dataset[0]
+        num_masked = sum(1 for l in sample["labels"] if l == -100)
+        num_train = sum(1 for l in sample["labels"] if l != -100)
+        print(f"  Sample: {len(sample['labels'])} total tokens")
+        print(f"    Masked (instruction+input+padding): {num_masked}")
+        print(f"    Trainable (response): {num_train}")
 
     # Split into train/eval
     split = tokenized_dataset.train_test_split(test_size=0.1, seed=42)
     train_dataset = split["train"]
     eval_dataset = split["test"]
 
-    print(f"  Training samples: {len(train_dataset)}")
-    print(f"  Evaluation samples: {len(eval_dataset)}")
+    if is_main:
+        print(f"  Training samples: {len(train_dataset)}")
+        print(f"  Evaluation samples: {len(eval_dataset)}")
 
     # Create versioned output directory
+    # In DDP mode, only the main process (local_rank 0) creates the directory
+    # All processes must use the same output_dir path
     model_short = args.base_model.split("/")[-1].split("-")[0]
-    output_dir = get_model_version_dir(args.output_dir, model_short)
-    print(f"\n  Output directory: {output_dir}")
 
-    # Save training config
-    training_config = {
-        "base_model": args.base_model,
-        "model_short": model_short,
-        "training_data": args.training_data,
-        "lora_r": args.lora_r,
-        "lora_alpha": args.lora_alpha,
-        "lora_dropout": args.lora_dropout,
-        "epochs": args.epochs,
-        "batch_size": args.batch_size,
-        "learning_rate": args.learning_rate,
-        "quantization": args.quantize,
-        "max_length": args.max_length,
-        "started_at": datetime.now().isoformat(),
-    }
+    marker = Path(args.output_dir) / ".current_ddp_run"
 
-    with open(output_dir / "training_config.json", 'w') as f:
-        json.dump(training_config, f, indent=2)
+    if local_rank <= 0:
+        # Main process or non-DDP: create the versioned directory
+        # Delete stale marker from previous crashed runs BEFORE creating new dir
+        if local_rank == 0 and marker.exists():
+            marker.unlink()
+
+        output_dir = get_model_version_dir(args.output_dir, model_short)
+        print(f"\n  Output directory: {output_dir}")
+
+        # Save training config
+        training_config = {
+            "base_model": args.base_model,
+            "model_short": model_short,
+            "training_data": args.training_data,
+            "lora_r": args.lora_r,
+            "lora_alpha": args.lora_alpha,
+            "lora_dropout": args.lora_dropout,
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "gradient_accumulation_steps": args.gradient_accumulation_steps,
+            "learning_rate": args.learning_rate,
+            "quantization": args.quantize,
+            "max_length": args.max_length,
+            "started_at": datetime.now().isoformat(),
+            "num_gpus": gpu_count if local_rank >= 0 else 1,
+            "ddp": local_rank >= 0,
+            "style_enhanced": getattr(args, 'style_enhanced', False),
+        }
+
+        with open(output_dir / "training_config.json", 'w') as f:
+            json.dump(training_config, f, indent=2)
+
+        # Atomic write: write to temp file then rename (rename is atomic on Linux)
+        if local_rank == 0:
+            tmp_marker = marker.with_suffix(".tmp")
+            tmp_marker.write_text(str(output_dir))
+            os.replace(str(tmp_marker), str(marker))  # atomic rename
+    else:
+        # DDP worker process: wait for main process to create directory
+        import time
+        for _ in range(60):
+            if marker.exists():
+                content = marker.read_text().strip()
+                if content:  # Ensure file is non-empty (write completed)
+                    output_dir = Path(content)
+                    break
+            time.sleep(0.5)
+        else:
+            raise RuntimeError("DDP worker: failed to get output directory from main process")
+        print(f"  [rank {local_rank}] Using output directory: {output_dir}")
+
+    # Synchronize all DDP processes before training starts
+    # Must init process group explicitly here (TrainingArguments does it later, but we need it now)
+    if local_rank >= 0:
+        if not torch.distributed.is_initialized():
+            torch.distributed.init_process_group(backend="nccl")
+        torch.distributed.barrier(device_ids=[local_rank])
 
     training_args = TrainingArguments(
         output_dir=str(output_dir),
@@ -684,11 +830,13 @@ def train_with_transformers(args):
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
         weight_decay=0.01,
-        logging_steps=10,
+        logging_steps=args.log_every,
+        logging_strategy="steps",
+        logging_first_step=True,
         eval_strategy="steps",
-        eval_steps=100,
-        save_steps=100,
-        save_total_limit=3,
+        eval_steps=args.save_steps,
+        save_steps=args.save_steps,
+        save_total_limit=args.save_total_limit,
         warmup_ratio=0.1,
         lr_scheduler_type="cosine",
         # Use bf16 instead of fp16 for better compatibility with 4-bit quantization
@@ -696,8 +844,13 @@ def train_with_transformers(args):
         fp16=False,
         report_to="none",
         push_to_hub=False,
-        gradient_checkpointing=True,
-        gradient_checkpointing_kwargs={"use_reentrant": False},
+        # Gradient checkpointing already enabled by prepare_model_for_kbit_training
+        gradient_checkpointing=False,
+        # DDP settings for quantized LoRA models
+        ddp_find_unused_parameters=False if local_rank >= 0 else None,
+        # Disable dataloader multiprocessing to avoid potential issues
+        dataloader_num_workers=0,
+        disable_tqdm=args.disable_tqdm,
     )
 
     # Data collator - use default since we provide labels explicitly
@@ -705,76 +858,196 @@ def train_with_transformers(args):
     data_collator = default_data_collator
 
     # Create trainer
+    class ProgressCallback(TrainerCallback):
+        def __init__(self, log_every: int, is_main_process: bool = True):
+            self.log_every = max(1, log_every)
+            self.is_main_process = is_main_process
+            self._train_start = None
+            self._step_times = []  # recent step durations for speed calc
+            self._last_step_time = None
+            self._eval_time_total = 0.0
+            self._eval_start = None
+
+        def on_train_begin(self, args, state, control, **kwargs):
+            import time
+            self._train_start = time.time()
+            self._last_step_time = time.time()
+
+        def on_evaluate(self, args, state, control, **kwargs):
+            import time
+            self._eval_start = time.time()
+
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            import time
+            if self._eval_start and logs and "eval_loss" in logs:
+                self._eval_time_total += time.time() - self._eval_start
+                self._eval_start = None
+
+        def on_step_end(self, args, state, control, **kwargs):
+            import time
+            now = time.time()
+            if self._last_step_time:
+                self._step_times.append(now - self._last_step_time)
+                # Keep last 20 steps for moving average
+                if len(self._step_times) > 20:
+                    self._step_times = self._step_times[-20:]
+            self._last_step_time = now
+
+            if self.is_main_process and state.global_step % self.log_every == 0:
+                max_steps = state.max_steps if state.max_steps else 0
+                remaining = max_steps - state.global_step
+
+                # Calculate speed and ETA
+                eta_str = ""
+                if self._step_times and remaining > 0:
+                    avg_step = sum(self._step_times) / len(self._step_times)
+                    speed = 1.0 / avg_step if avg_step > 0 else 0
+                    eta_sec = remaining * avg_step
+                    # Add estimated eval time (one eval every eval_steps)
+                    eval_steps = args.eval_steps or 100
+                    evals_remaining = remaining // eval_steps
+                    if self._eval_time_total > 0 and state.global_step > 0:
+                        avg_eval = self._eval_time_total  # total so far from single/few evals
+                        evals_done = max(1, state.global_step // eval_steps)
+                        avg_eval = self._eval_time_total / evals_done
+                        eta_sec += evals_remaining * avg_eval
+
+                    hours = int(eta_sec // 3600)
+                    mins = int((eta_sec % 3600) // 60)
+                    if hours > 0:
+                        eta_str = f" | ETA: {hours}h{mins:02d}m | {avg_step:.1f}s/step"
+                    else:
+                        eta_str = f" | ETA: {mins}m | {avg_step:.1f}s/step"
+
+                pct = f" ({100*state.global_step/max_steps:.0f}%)" if max_steps else ""
+                print(f"[step {state.global_step}/{max_steps}]{pct}{eta_str}", flush=True)
+
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator,
+        callbacks=[ProgressCallback(args.log_every, is_main_process=(local_rank <= 0))],
     )
 
     # Train
-    print("\n" + "=" * 60)
-    print("Starting Training")
-    print("=" * 60)
-    print("\nThis may take a while depending on your hardware...")
-    print("Training progress will be shown below:")
-    print("-" * 40)
+    import time as _time
+    _train_wall_start = _time.time()
+
+    if local_rank <= 0:
+        print("\n" + "=" * 60)
+        print("Starting Training")
+        print("=" * 60)
+        total_steps = trainer.state.max_steps if trainer.state.max_steps else len(train_dataset) * args.epochs // (args.batch_size * args.gradient_accumulation_steps * max(1, gpu_count))
+        print(f"\n  Total steps: {total_steps}")
+        print(f"  Epochs: {args.epochs}, Eval every: {training_args.eval_steps} steps")
+        print(f"  Effective batch: {args.batch_size} × {gpu_count} GPU × {args.gradient_accumulation_steps} accum = {args.batch_size * gpu_count * args.gradient_accumulation_steps}")
+        print("\nTraining progress will be shown below:")
+        print("-" * 40)
 
     try:
         trainer.train()
 
-        print("-" * 40)
-        print("\nTraining complete!")
+        # Only main process handles saving and reporting
+        if local_rank <= 0:
+            _train_wall_end = _time.time()
+            _duration = _train_wall_end - _train_wall_start
+            _hours = int(_duration // 3600)
+            _mins = int((_duration % 3600) // 60)
+            _total_steps = trainer.state.global_step
+            _avg_step = _duration / _total_steps if _total_steps > 0 else 0
 
-        # Save model
-        print(f"\nSaving model to: {output_dir}")
-        model.save_pretrained(output_dir)
-        tokenizer.save_pretrained(output_dir)
+            print("-" * 40)
+            print(f"\nTraining complete!")
+            print(f"  Duration: {_hours}h{_mins:02d}m ({_duration:.0f}s)")
+            print(f"  Steps: {_total_steps}, Avg: {_avg_step:.1f}s/step")
 
-        # Update metadata
-        update_model_metadata(output_dir, {
-            "status": "completed",
-            "completed_at": datetime.now().isoformat(),
-        })
+            # Save model
+            print(f"\nSaving model to: {output_dir}")
+            model.save_pretrained(output_dir)
+            tokenizer.save_pretrained(output_dir)
 
-        # Update registry
-        registry = create_model_registry(args.output_dir)
+            # Save training metrics for visualization
+            metrics_path = output_dir / "training_metrics.json"
+            with open(metrics_path, 'w') as f:
+                json.dump(trainer.state.log_history, f, indent=2)
+            print(f"  Training metrics saved to: {metrics_path.name}")
 
-        print("\n" + "=" * 60)
-        print("Training Summary")
-        print("=" * 60)
-        print(f"  Model saved to: {output_dir}")
-        print(f"  Total models in registry: {len(registry['models'])}")
+            # Update metadata
+            update_model_metadata(output_dir, {
+                "status": "completed",
+                "completed_at": datetime.now().isoformat(),
+                "duration_seconds": round(_duration),
+                "duration_human": f"{_hours}h{_mins:02d}m",
+                "total_steps": _total_steps,
+                "avg_seconds_per_step": round(_avg_step, 1),
+            })
 
-        print("\n" + "-" * 60)
-        print("Next Steps")
-        print("-" * 60)
-        print("\n  Option 1: Load directly in Python:")
-        print(f"    from peft import PeftModel")
-        print(f"    model = PeftModel.from_pretrained(base_model, '{output_dir}')")
-        print("\n  Option 2: Merge with base model:")
-        print(f"    python scripts/merge_lora.py --adapter {output_dir}")
-        print("\n  Option 3: Use with vLLM:")
-        print(f"    Configure LORA_ADAPTER_PATH={output_dir} in .env")
+            # Update registry
+            registry = create_model_registry(args.output_dir)
+
+            # Clean up DDP marker file
+            if marker.exists():
+                marker.unlink()
+
+            # Auto-generate training plots
+            if not args.no_visualize:
+                try:
+                    import subprocess
+                    plot_script = Path(__file__).parent / "plot_training.py"
+                    if plot_script.exists():
+                        print(f"\n  Generating training plots...")
+                        subprocess.run(
+                            [sys.executable, str(plot_script), str(output_dir)],
+                            check=False, capture_output=False,
+                        )
+                except Exception as e:
+                    print(f"  Note: Visualization skipped ({e})")
+
+            print("\n" + "=" * 60)
+            print("Training Summary")
+            print("=" * 60)
+            print(f"  Model saved to: {output_dir}")
+            print(f"  Total models in registry: {len(registry['models'])}")
+            param_tuning_dir = output_dir / "Parameter_Tuning"
+            if param_tuning_dir.exists():
+                print(f"  Plots saved to: {param_tuning_dir}/")
+
+            print("\n" + "-" * 60)
+            print("Next Steps")
+            print("-" * 60)
+            print("\n  Option 1: Load directly in Python:")
+            print(f"    from peft import PeftModel")
+            print(f"    model = PeftModel.from_pretrained(base_model, '{output_dir}')")
+            print("\n  Option 2: Merge with base model:")
+            print(f"    python scripts/merge_lora.py --adapter {output_dir}")
+            print("\n  Option 3: Use with vLLM:")
+            print(f"    Configure LORA_ADAPTER_PATH={output_dir} in .env")
 
         return str(output_dir)
 
     except KeyboardInterrupt:
-        print("\n\nTraining interrupted by user.")
-        update_model_metadata(output_dir, {
-            "status": "interrupted",
-            "interrupted_at": datetime.now().isoformat(),
-        })
+        if local_rank <= 0:
+            print("\n\nTraining interrupted by user.")
+            update_model_metadata(output_dir, {
+                "status": "interrupted",
+                "interrupted_at": datetime.now().isoformat(),
+            })
+            if marker.exists():
+                marker.unlink()
         return None
 
     except Exception as e:
-        print(f"\nERROR: Training failed: {e}")
-        update_model_metadata(output_dir, {
-            "status": "failed",
-            "error": str(e),
-            "failed_at": datetime.now().isoformat(),
-        })
+        if local_rank <= 0:
+            print(f"\nERROR: Training failed: {e}")
+            update_model_metadata(output_dir, {
+                "status": "failed",
+                "error": str(e),
+                "failed_at": datetime.now().isoformat(),
+            })
+            if marker.exists():
+                marker.unlink()
         return None
 
 
@@ -795,6 +1068,9 @@ Examples:
 
   # CPU-only training (slow)
   python scripts/finetune_lora.py --cpu
+
+  # Multi-GPU DDP (proper data-parallel training)
+  accelerate launch --num_processes=2 scripts/finetune_lora.py --model mistral-nemo
 
 Available model aliases:
   mistral, mistral-large, llama3, llama3-70b, qwen, qwen-14b, qwen-1.5b,
@@ -823,6 +1099,11 @@ Note: For Mac users, use scripts/finetune_mlx_mac.py instead.
         "--cpu",
         action="store_true",
         help="Force CPU training (very slow)"
+    )
+    parser.add_argument(
+        "--multi-gpu",
+        action="store_true",
+        help="[Deprecated] Use 'accelerate launch --num_processes=N' for multi-GPU DDP instead"
     )
     parser.add_argument(
         "--training-data",
@@ -893,18 +1174,60 @@ Note: For Mac users, use scripts/finetune_mlx_mac.py instead.
         action="store_true",
         help="Only check dependencies, don't train"
     )
+    parser.add_argument(
+        "--log-every",
+        type=int,
+        default=10,
+        help="Log progress every N steps (default: 10)"
+    )
+    parser.add_argument(
+        "--disable-tqdm",
+        action="store_true",
+        help="Disable tqdm progress bar (useful for log files)"
+    )
+    parser.add_argument(
+        "--no-visualize",
+        action="store_true",
+        help="Skip post-training plot generation"
+    )
+    parser.add_argument(
+        "--style-enhanced",
+        action="store_true",
+        help="Style-enhanced mode: uses larger LoRA rank (32), alpha (64), "
+             "longer context (4096 tokens), and expects context-window training data. "
+             "Improves learning of transitions, argument structure, and cross-paragraph patterns."
+    )
+    parser.add_argument(
+        "--save-steps",
+        type=int,
+        default=100,
+        help="Save checkpoint every N steps (default: 100). Set to steps-per-epoch "
+             "for per-epoch checkpoints."
+    )
+    parser.add_argument(
+        "--save-total-limit",
+        type=int,
+        default=5,
+        help="Maximum number of checkpoints to keep (default: 5)"
+    )
 
     args = parser.parse_args()
 
-    print("\n" + "=" * 60)
-    print("GSWA LoRA Fine-tuning Script")
-    print("=" * 60)
+    # Determine rank early to suppress duplicate output from DDP workers
+    _local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    _is_main = _local_rank <= 0
+
+    if _is_main:
+        print("\n" + "=" * 60)
+        print("GSWA LoRA Fine-tuning Script")
+        print("=" * 60)
 
     # Handle model selection
     if args.model:
         # Resolve alias if provided
         args.base_model = MODEL_ALIASES.get(args.model.lower(), args.model)
-        print(f"\nModel: {args.base_model}")
+        if _is_main:
+            print(f"\nModel: {args.base_model}")
 
     # Auto-detect settings if requested
     if args.auto:
@@ -928,13 +1251,38 @@ Note: For Mac users, use scripts/finetune_mlx_mac.py instead.
         if auto_settings.get("use_cpu"):
             args.cpu = True
 
-    # Check dependencies
-    if not check_dependencies():
-        sys.exit(1)
+    # Apply style-enhanced mode overrides
+    if args.style_enhanced:
+        args.lora_r = 32
+        args.lora_alpha = 64
+        args.max_length = 4096
+        args.epochs = max(args.epochs, 4)
+        # Use context-window training data if default training data path
+        if args.training_data == "./data/training/alpaca_train.jsonl":
+            context_window_path = "./data/training/context-window_train.jsonl"
+            if Path(context_window_path).exists():
+                args.training_data = context_window_path
+            else:
+                if _is_main:
+                    print(f"\n  Note: context-window data not found at {context_window_path}")
+                    print(f"        Generate it with: python scripts/prepare_training_data.py "
+                          f"--format context-window --section-aware --split")
+                    print(f"        Falling back to: {args.training_data}")
+        if _is_main:
+            print(f"\n  Style-Enhanced Mode:")
+            print(f"    LoRA rank: {args.lora_r}, alpha: {args.lora_alpha}")
+            print(f"    Max sequence length: {args.max_length}")
+            print(f"    Epochs: {args.epochs}")
+            print(f"    Training data: {args.training_data}")
 
-    if args.check_only:
-        print("\nDependency check passed!")
-        sys.exit(0)
+    # Check dependencies (only on main process; workers share the same environment)
+    if _is_main:
+        if not check_dependencies():
+            sys.exit(1)
+
+        if args.check_only:
+            print("\nDependency check passed!")
+            sys.exit(0)
 
     # CPU mode warning
     if args.cpu:
@@ -948,9 +1296,10 @@ Note: For Mac users, use scripts/finetune_mlx_mac.py instead.
         if torch.cuda.is_available():
             print("\nNote: CUDA GPU detected but --cpu flag is set.")
 
-    # Check training data
-    if not check_training_data(args.training_data):
-        sys.exit(1)
+    # Check training data (only main process prints; workers share same filesystem)
+    if _is_main:
+        if not check_training_data(args.training_data):
+            sys.exit(1)
 
     # Run training
     result = train_with_transformers(args)

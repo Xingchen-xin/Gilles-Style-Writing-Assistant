@@ -24,6 +24,77 @@ from pathlib import Path
 from typing import Iterator
 
 
+def is_reference_content(text: str) -> bool:
+    """Detect if text is bibliographic reference content (reference list entries).
+
+    Reference LIST entries (not inline citations) typically have:
+    - Multiple author names followed by years: "Author, A.B. & Author, C.D. (2018)"
+    - Journal volume/page patterns in sequence: "Nature, 45, 123-456"
+    - High density of year-citation patterns throughout the text
+    - Start with author names and years (bibliography format)
+
+    We want to filter REFERENCE LISTS, not prose with inline citations.
+
+    Returns True if the text appears to be from a reference/bibliography section.
+    """
+    # Skip very short text
+    if len(text) < 100:
+        return False
+
+    # Strong reference list indicators (bibliography-style patterns)
+    strong_indicators = 0
+
+    # Pattern 1: Multiple "Author et al. (YYYY)" or "Author, A.B. (YYYY)" patterns
+    # This is distinctive of reference lists, not inline citations
+    author_year_pattern = r'[A-Z][a-z]+(?:,\s*[A-Z]\.[A-Z]?\.?)?\s+(?:et al\.?\s*)?\((?:19|20)\d{2}\)'
+    author_year_matches = len(re.findall(author_year_pattern, text))
+    if author_year_matches >= 4:
+        strong_indicators += 2
+    elif author_year_matches >= 2:
+        strong_indicators += 1
+
+    # Pattern 2: Journal volume-page patterns: "Nature, 45, 123-456" or "J. Bacteriol., 123, 45-67"
+    vol_page_pattern = r'[A-Z][a-z]+\.?\s*,?\s*\d+,\s*\d+[-–]\d+'
+    vol_page_matches = len(re.findall(vol_page_pattern, text))
+    if vol_page_matches >= 3:
+        strong_indicators += 2
+    elif vol_page_matches >= 1:
+        strong_indicators += 1
+
+    # Pattern 3: Text starts with what looks like a reference entry
+    # (Author names followed by year)
+    if re.match(r'^[A-Z][a-z]+,?\s*[A-Z]\.', text):
+        strong_indicators += 1
+
+    # Pattern 4: Multiple DOIs in text (typical of reference lists)
+    doi_count = len(re.findall(r'10\.\d{4,}/', text))
+    if doi_count >= 2:
+        strong_indicators += 2
+    elif doi_count >= 1:
+        strong_indicators += 1
+
+    # Pattern 5: Very high density of "(YYYY)" patterns (>5 per paragraph)
+    year_count = len(re.findall(r'\((?:19|20)\d{2}\)', text))
+    if year_count >= 6:
+        strong_indicators += 2
+    elif year_count >= 4:
+        strong_indicators += 1
+
+    # Pattern 6: Contains typical journal abbreviation sequences
+    journal_sequences = [
+        r'J\.\s+[A-Z][a-z]+\.',  # J. Bacteriol.
+        r'Nat\.\s+[A-Z][a-z]+',   # Nat. Rev.
+        r'Annu\.\s+Rev\.',        # Annu. Rev.
+        r'Proc\.\s+Natl',         # Proc. Natl. Acad.
+    ]
+    journal_count = sum(len(re.findall(p, text)) for p in journal_sequences)
+    if journal_count >= 3:
+        strong_indicators += 1
+
+    # Threshold: 3+ strong indicators means this is likely a reference list
+    return strong_indicators >= 3
+
+
 def extract_paragraphs_from_text(text: str, min_words: int = 20) -> list[str]:
     """Extract meaningful paragraphs from text.
 
@@ -37,6 +108,9 @@ def extract_paragraphs_from_text(text: str, min_words: int = 20) -> list[str]:
     # Split by double newlines or multiple spaces
     paragraphs = re.split(r'\n\s*\n|\r\n\s*\r\n', text)
 
+    # Track if we're in a reference section
+    in_reference_section = False
+
     result = []
     for para in paragraphs:
         # Clean up whitespace
@@ -46,8 +120,19 @@ def extract_paragraphs_from_text(text: str, min_words: int = 20) -> list[str]:
         if len(para.split()) < min_words:
             continue
 
-        # Skip if looks like header/footer/reference
-        if re.match(r'^(Figure|Table|References|Bibliography|\d+\.?\s*$)', para):
+        # Skip if looks like header/footer/reference section start
+        if re.match(r'^(Figure|Table|References|Bibliography|REFERENCES|\d+\.?\s*$)', para, re.IGNORECASE):
+            # Mark that we've entered reference section
+            if re.match(r'^(References|Bibliography|REFERENCES)', para, re.IGNORECASE):
+                in_reference_section = True
+            continue
+
+        # Skip everything after "References" section header
+        if in_reference_section:
+            continue
+
+        # Skip if content looks like bibliographic references
+        if is_reference_content(para):
             continue
 
         # Skip if mostly numbers (likely a table)

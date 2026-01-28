@@ -1,4 +1,4 @@
-.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup setup-auto setup-mac setup-ollama prepare-training finetune-lora finetune-mlx finetune-mlx-safe finetune-all finetune-all-safe finetune-smart finetune-deepspeed finetune-background list-docs training-stats check-deps check-mlx check-lora corpus corpus-add corpus-guide corpus-validate train train-auto train-safe train-model status models analyze-style style-show ai-check humanize analyze-data preprocess-data train-linux train-linux-safe train-linux-full train-info
+.PHONY: install dev test lint smoke-test run clean build-index parse-corpus export-dpo help setup setup-auto setup-mac setup-ollama generate-pairs augment-pairs prepare-training prepare-style-enhanced finetune-lora finetune-mlx finetune-mlx-safe finetune-all finetune-all-safe finetune-smart finetune-style-enhanced finetune-style-enhanced-bg finetune-deepspeed finetune-background list-docs training-stats check-deps check-mlx check-lora corpus corpus-add corpus-guide corpus-validate train train-auto train-safe train-model status models analyze-style style-show ai-check humanize analyze-data preprocess-data train-linux train-linux-safe train-linux-full train-info start-vllm start-vllm-lora serve serve-secure serve-noauth check-vllm stop-vllm
 
 # Default target
 help:
@@ -6,9 +6,11 @@ help:
 	@echo ""
 	@echo "=== Quick Start (傻瓜式一键操作) ==="
 	@echo ""
-	@echo "  1. Setup:    make setup-cuda-auto  (Linux GPU) or make setup-auto (Mac)"
-	@echo "  2. Train:    make finetune-smart   (auto-detect platform & hardware)"
-	@echo "  3. Run:      make run              (start server at localhost:8080)"
+	@echo "  1. Setup:          make setup-cuda-auto  (Linux GPU)"
+	@echo "  2. Parse corpus:   make parse-corpus"
+	@echo "  3. Generate pairs: make generate-pairs   (style-transfer, ~4hrs, one-time)"
+	@echo "  4. Train:          make finetune-smart   (auto-detect platform & hardware)"
+	@echo "  5. Evaluate:       make evaluate MODEL_DIR=models/gswa-lora-..."
 	@echo ""
 	@echo "=== All Commands ==="
 	@echo ""
@@ -17,23 +19,36 @@ help:
 	@echo "    setup-cuda-auto  Automatic setup with CUDA (NVIDIA GPU)"
 	@echo "    train-info       Show hardware info and recommendations"
 	@echo ""
-	@echo "  Training:"
-	@echo "    finetune-smart   One-click training (auto-detect platform) - RECOMMENDED"
-	@echo "    parse-corpus     Parse PDF/DOCX files to training data"
+	@echo "  Data Preparation:"
+	@echo "    parse-corpus     Parse PDF/DOCX files to corpus"
+	@echo "    generate-pairs   Generate style-transfer pairs (one-time, ~4hrs)"
+	@echo "    prepare-training Create training JSONL from style pairs"
 	@echo "    status           Show corpus and training status"
 	@echo ""
-	@echo "  Server:"
-	@echo "    run              Start development server"
-	@echo "    test             Run unit tests"
+	@echo "  Training:"
+	@echo "    finetune-smart             One-click training (auto-detect) - RECOMMENDED"
+	@echo "    finetune-style-enhanced    Style-enhanced (multi-paragraph, rank=32)"
+	@echo "    finetune-style-enhanced-bg Style-enhanced in background (tmux)"
+	@echo "    finetune-background        Background training (tmux, survives terminal close)"
 	@echo ""
-	@echo "  AI Detection:"
-	@echo "    ai-check         Check text for AI traces"
-	@echo "    humanize         Auto-humanize text"
+	@echo "  Evaluation & Visualization:"
+	@echo "    evaluate         Generate text samples (MODEL_DIR=models/...)"
+	@echo "    visualize        Plot training metrics (MODEL_DIR=models/...)"
+	@echo "    compare-runs     Compare all training runs"
+	@echo ""
+	@echo "  Server & Deployment:"
+	@echo "    serve            One-click with AUTH (user:gilles) RECOMMENDED"
+	@echo "    serve-secure     Custom auth (USER=x PASS=y)"
+	@echo "    serve-noauth     No authentication (local dev only)"
+	@echo "    tunnel           Create public tunnel (cloudflared)"
+	@echo "    run              API only (no vLLM, with auth)"
+	@echo "    start-vllm-lora  Start vLLM with LoRA adapters"
+	@echo "    check-vllm       Check if vLLM is running"
+	@echo "    stop-vllm        Stop vLLM server"
 	@echo ""
 	@echo "  Advanced (see docs/TRAINING_GUIDE.md):"
-	@echo "    train-safe           Memory-safe training (Mac)"
 	@echo "    train-linux-safe     Linux CUDA training with OOM fallback"
-	@echo "    finetune-background  Background training (tmux, survives terminal close)"
+	@echo "    finetune-deepspeed   Multi-GPU 70B+ (DeepSpeed ZeRO-3)"
 
 # ==================
 # One-Click Setup
@@ -93,13 +108,154 @@ smoke-test:
 smoke-test-security:
 	python scripts/smoke_test.py --skip-llm
 
-# Start GSWA server (development mode)
+# Start GSWA server (development mode, localhost only)
 run:
-	uvicorn gswa.main:app --reload --host 0.0.0.0 --port 8080
+	micromamba run -n gswa uvicorn gswa.main:app --reload --host 127.0.0.1 --port 8080
 
-# Start GSWA server (production mode)
+# Start GSWA server (external access - accessible from other machines)
+run-external:
+	@echo "Starting GSWA server on 0.0.0.0:8080"
+	@echo "Access at: http://$$(hostname -I | awk '{print $$1}'):8080"
+	micromamba run -n gswa uvicorn gswa.main:app --host 0.0.0.0 --port 8080
+
+# Start GSWA server (production mode with multiple workers)
 run-prod:
-	uvicorn gswa.main:app --host 0.0.0.0 --port 8080 --workers 4
+	micromamba run -n gswa uvicorn gswa.main:app --host 0.0.0.0 --port 8080 --workers 4
+
+# Start both vLLM and GSWA API in tmux (production deployment)
+run-production:
+	@echo "Starting production deployment..."
+	@tmux has-session -t gswa-prod 2>/dev/null && tmux kill-session -t gswa-prod || true
+	@tmux new-session -d -s gswa-prod -n vllm 'cd $(CURDIR) && make start-vllm-lora; read'
+	@sleep 5
+	@tmux new-window -t gswa-prod -n api 'cd $(CURDIR) && make run-external; read'
+	@echo ""
+	@echo "Production services started in tmux session 'gswa-prod'"
+	@echo "  - vLLM server on port 8001"
+	@echo "  - GSWA API on port 8080"
+	@echo ""
+	@echo "Access at: http://$$(hostname -I | awk '{print $$1}'):8080"
+	@echo ""
+	@echo "Commands:"
+	@echo "  tmux attach -t gswa-prod   # View sessions"
+	@echo "  tmux kill-session -t gswa-prod  # Stop all"
+
+# Stop production services
+stop-production:
+	@tmux kill-session -t gswa-prod 2>/dev/null || echo "No production session running"
+
+# Quick tunnel for public access (requires cloudflared)
+tunnel:
+	@echo "Starting Cloudflare tunnel to localhost:8080..."
+	@echo "Note: Install with: curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared && chmod +x cloudflared"
+	./cloudflared tunnel --url http://localhost:8080 2>/dev/null || cloudflared tunnel --url http://localhost:8080
+
+# Check if vLLM is running
+check-vllm:
+	@bash scripts/start_vllm.sh --check || true
+
+# ==================
+# One-Click Serve (vLLM + API)
+# ==================
+
+# Full service: auto-start vLLM (background) + API server
+# Authentication is ENABLED by default (user: gilles, pass: IBLGilles2026)
+# Usage: make serve
+serve:
+	@echo "========================================"
+	@echo "Starting GSWA Full Service"
+	@echo "========================================"
+	@echo ""
+	@echo "Step 1: Check/Start vLLM..."
+	@bash scripts/start_vllm.sh --lora --background || true
+	@sleep 2
+	@echo ""
+	@echo "Step 2: Starting GSWA API server..."
+	@echo "  Authentication: ENABLED (default credentials)"
+	@echo "  Username: gilles"
+	@echo "  Access at: http://$$(hostname -I | awk '{print $$1}'):8080"
+	@echo ""
+	micromamba run -n gswa uvicorn gswa.main:app --host 0.0.0.0 --port 8080
+
+# Full service with custom password (override defaults)
+# Usage: make serve-secure USER=admin PASS=secret
+serve-secure:
+	@if [ -z "$(USER)" ] || [ -z "$(PASS)" ]; then \
+		echo "Usage: make serve-secure USER=admin PASS=your-password"; \
+		echo ""; \
+		echo "Example:"; \
+		echo "  make serve-secure USER=gilles PASS=mySuperSecret123"; \
+		echo ""; \
+		echo "Note: Default credentials (make serve) are:"; \
+		echo "  Username: gilles"; \
+		echo "  Password: IBLGilles2026"; \
+	else \
+		echo "========================================"; \
+		echo "Starting GSWA Full Service (Custom Auth)"; \
+		echo "========================================"; \
+		echo ""; \
+		echo "Step 1: Check/Start vLLM..."; \
+		bash scripts/start_vllm.sh --lora --background || true; \
+		sleep 2; \
+		echo ""; \
+		echo "Step 2: Starting GSWA API server with custom authentication..."; \
+		echo "  Username: $(USER)"; \
+		echo "  Password: ********"; \
+		echo "  Access at: http://$$(hostname -I | awk '{print $$1}'):8080"; \
+		echo ""; \
+		GSWA_AUTH_USER=$(USER) GSWA_AUTH_PASS=$(PASS) micromamba run -n gswa uvicorn gswa.main:app --host 0.0.0.0 --port 8080; \
+	fi
+
+# Serve WITHOUT authentication (for local development only)
+# Usage: make serve-noauth
+serve-noauth:
+	@echo "========================================"
+	@echo "Starting GSWA (NO AUTHENTICATION)"
+	@echo "========================================"
+	@echo "WARNING: No password protection - for local use only!"
+	@echo ""
+	@bash scripts/start_vllm.sh --lora --background || true
+	@sleep 2
+	GSWA_AUTH_ENABLED=false micromamba run -n gswa uvicorn gswa.main:app --host 0.0.0.0 --port 8080
+
+# Stop vLLM server
+stop-vllm:
+	@echo "Stopping vLLM..."
+	@pkill -f "vllm.entrypoints.openai.api_server" 2>/dev/null && echo "vLLM stopped" || echo "vLLM not running"
+
+# Start with password protection (for public access)
+# Usage: make run-secure USER=admin PASS=secretpassword
+run-secure:
+	@if [ -z "$(USER)" ] || [ -z "$(PASS)" ]; then \
+		echo "Usage: make run-secure USER=admin PASS=your-password"; \
+		echo ""; \
+		echo "Example:"; \
+		echo "  make run-secure USER=gilles PASS=mySuperSecret123"; \
+	else \
+		echo "Starting GSWA with password protection..."; \
+		echo "  Username: $(USER)"; \
+		echo "  Password: ********"; \
+		echo "  Access at: http://$$(hostname -I | awk '{print $$1}'):8080"; \
+		echo ""; \
+		GSWA_AUTH_USER=$(USER) GSWA_AUTH_PASS=$(PASS) micromamba run -n gswa uvicorn gswa.main:app --host 0.0.0.0 --port 8080; \
+	fi
+
+# Start production with authentication
+# Usage: make run-production-secure USER=admin PASS=secretpassword
+run-production-secure:
+	@if [ -z "$(USER)" ] || [ -z "$(PASS)" ]; then \
+		echo "Usage: make run-production-secure USER=admin PASS=your-password"; \
+	else \
+		echo "Starting production deployment with authentication..."; \
+		tmux has-session -t gswa-prod 2>/dev/null && tmux kill-session -t gswa-prod || true; \
+		tmux new-session -d -s gswa-prod -n vllm 'make start-vllm-lora; read'; \
+		sleep 5; \
+		tmux new-window -t gswa-prod -n api "GSWA_AUTH_USER=$(USER) GSWA_AUTH_PASS=$(PASS) micromamba run -n gswa uvicorn gswa.main:app --host 0.0.0.0 --port 8080; read"; \
+		echo ""; \
+		echo "Production services started with authentication!"; \
+		echo "  Username: $(USER)"; \
+		echo "  Access at: http://$$(hostname -I | awk '{print $$1}'):8080"; \
+	fi
 
 # ==================
 # Mac Setup (Ollama)
@@ -118,9 +274,14 @@ setup-ollama:
 # Linux Setup (vLLM)
 # ==================
 
-# Start vLLM server
+# Start vLLM server (base model only)
 start-vllm:
 	bash scripts/start_vllm.sh
+
+# Start vLLM server with LoRA adapters (auto-discovers trained models)
+# UI will show available models in dropdown
+start-vllm-lora:
+	bash scripts/start_vllm.sh --lora
 
 # ==================
 # Corpus Management
@@ -138,7 +299,18 @@ parse-corpus:
 # Fine-tuning
 # ==================
 
-# Prepare training data from corpus (with priority weights)
+# Generate style-transfer pairs (generic -> gilles) using local LLM
+# This is a one-time step (supports resume). Run before prepare-training.
+# Usage: make generate-pairs [OLLAMA_MODEL=llama3:70b]
+OLLAMA_MODEL ?= llama3:70b
+generate-pairs:
+	python scripts/prepare_training_data.py --generate-pairs --ollama-model $(OLLAMA_MODEL)
+
+# Generate augmented variants (V2=restructured, V3=condensed) for generalization
+augment-pairs:
+	python scripts/prepare_training_data.py --augment --ollama-model $(OLLAMA_MODEL)
+
+# Prepare training data from corpus (uses pre-generated style pairs)
 prepare-training:
 	python scripts/prepare_training_data.py --format alpaca --weighted --split
 
@@ -260,7 +432,55 @@ finetune-background: parse-corpus prepare-training
 	@echo "后台训练模式 (tmux)"
 	@echo "============================================"
 	@echo ""
-	python scripts/smart_finetune.py --background --yes
+	python scripts/smart_finetune.py --background --yes $(if $(MODEL),--model $(MODEL),) $(if $(DEEPSPEED),--deepspeed,) $(if $(LOG),--log-file $(LOG),)
+
+# Style-Enhanced Training Mode (better transition/argument/style learning)
+# 风格增强训练模式：使用多段落上下文、更大LoRA rank学习转折/思路/铺垫
+prepare-style-enhanced:
+	python scripts/prepare_training_data.py --format context-window --section-aware --split
+
+finetune-style-enhanced: parse-corpus prepare-style-enhanced
+	python scripts/smart_finetune.py --style-enhanced
+	@echo ""
+	@echo "============================================"
+	@echo "Style-Enhanced training complete!"
+	@echo "============================================"
+
+finetune-style-enhanced-bg: parse-corpus prepare-style-enhanced
+	python scripts/smart_finetune.py --style-enhanced --background --yes $(if $(MODEL),--model $(MODEL),) $(if $(LOG),--log-file $(LOG),)
+
+# ==================
+# Training Visualization & Evaluation
+# ==================
+
+# Visualize training results (generate plots)
+# Usage: make visualize MODEL_DIR=models/gswa-lora-Mistral-20260123-012408
+visualize:
+	@if [ -z "$(MODEL_DIR)" ]; then \
+		echo "Usage: make visualize MODEL_DIR=models/gswa-lora-..."; \
+		echo ""; \
+		echo "Available models:"; \
+		ls models/ 2>/dev/null | grep gswa-lora | tail -5 || echo "  (none found)"; \
+	else \
+		python scripts/plot_training.py $(MODEL_DIR); \
+	fi
+
+# Evaluate a trained model (generate text samples)
+# Usage: make evaluate MODEL_DIR=models/gswa-lora-Mistral-20260123-012408
+evaluate:
+	@if [ -z "$(MODEL_DIR)" ]; then \
+		echo "Usage: make evaluate MODEL_DIR=models/gswa-lora-..."; \
+		echo ""; \
+		echo "Available models:"; \
+		ls models/ 2>/dev/null | grep gswa-lora | tail -5 || echo "  (none found)"; \
+	else \
+		python scripts/evaluate_model.py $(MODEL_DIR); \
+	fi
+
+# Compare multiple training runs
+# Usage: make compare-runs
+compare-runs:
+	python scripts/plot_training.py models/gswa-lora-*/ --compare
 
 # ==================
 # Corpus Management

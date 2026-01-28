@@ -140,7 +140,7 @@ python scripts/finetune_mlx_mac.py --auto --memory-safe
 
 ---
 
-## 完整训练流程
+## 完整训练流程 (Style-Transfer Fine-tuning)
 
 ### 步骤 1: 准备语料
 
@@ -158,54 +158,63 @@ python scripts/finetune_mlx_mac.py --auto --memory-safe
 make parse-corpus
 ```
 
-### 步骤 3: 准备训练数据
+### 步骤 3: 生成 Style-Transfer Pairs
+
+使用本地 LLM 生成"通用"版本的 Gilles 段落。这是一次性操作，支持断点续传。
+
+```bash
+# 推荐：qwen3-coder:30b（速度快，~4小时）
+make generate-pairs OLLAMA_MODEL=qwen3-coder:30b
+
+# 或 llama3:70b（质量更高，~25小时）
+make generate-pairs OLLAMA_MODEL=llama3:70b
+```
+
+生成的 pairs 保存在 `data/training/style_pairs.jsonl`。
+
+**什么是 style-transfer pairs?**
+- 输入：Gilles 原始段落的"简化"通用学术英语版本（LLM 生成）
+- 输出：Gilles 原始段落
+- 模型学习：通用 → Gilles 风格的转换
+
+### 步骤 4: 准备训练数据
 
 ```bash
 make prepare-training
 ```
 
-### 步骤 4: 分析数据（可选但推荐）
+输出：
+- `data/training/alpaca_train.jsonl` - 训练集
+- `data/training/alpaca_val.jsonl` - 验证集
+
+### 步骤 5: 开始训练
 
 ```bash
-make analyze-data
-```
+# Linux GPU（推荐：一键智能训练）
+make finetune-smart
 
-这会显示：
-- 数据总条数
-- Token长度分布
-- 超过阈值的序列数量
-- 推荐的max_tokens设置
-
-### 步骤 5: 预处理数据（如果有长序列）
-
-```bash
-# 自动检测并分割
-make preprocess-data
-
-# 或指定最大长度
-make preprocess-data MAX_TOKENS=1024
-```
-
-### 步骤 6: 开始训练
-
-```bash
-# 内存安全模式（推荐）
+# Mac（MLX）
 make finetune-mlx-safe
 
-# 或标准模式
-make finetune-mlx
+# 后台运行（推荐长时间训练）
+make finetune-background
 ```
 
-### 步骤 7: 创建Ollama模型
+### 步骤 6: 评估模型效果
 
 ```bash
-ollama create gswa-gilles -f models/gswa-mlx-*/Modelfile
+# 生成样本并查看风格质量
+make evaluate MODEL_DIR=models/gswa-lora-Mistral-<timestamp>
+
+# 查看训练曲线
+make visualize MODEL_DIR=models/gswa-lora-Mistral-<timestamp>
 ```
 
-### 步骤 8: 配置并运行
+### 步骤 7: 部署模型
 
 ```bash
-echo 'VLLM_MODEL_NAME=gswa-gilles' >> .env
+# 配置 .env 使用 LoRA adapter
+echo 'LORA_ADAPTER_PATH=./models/gswa-lora-Mistral-<timestamp>' >> .env
 make run
 ```
 
@@ -215,13 +224,15 @@ make run
 
 | 命令 | 说明 |
 |------|------|
-| `make train-safe` | 傻瓜式一键训练（推荐） |
-| `make train-auto` | 自动训练（不询问确认） |
-| `make train` | 交互式训练向导 |
-| `make analyze-data` | 分析训练数据 |
-| `make preprocess-data` | 预处理长序列 |
-| `make finetune-mlx-safe` | 内存安全MLX训练 |
-| `make finetune-all-safe` | 完整流程（内存安全） |
+| `make parse-corpus` | 解析语料库 PDF/DOCX |
+| `make generate-pairs` | 生成风格转换对（一次性, ~4小时） |
+| `make prepare-training` | 准备训练数据 |
+| `make finetune-smart` | 一键智能训练（Linux/Mac, 推荐） |
+| `make finetune-background` | 后台训练（关闭终端不中断） |
+| `make visualize MODEL_DIR=...` | 训练曲线可视化 |
+| `make evaluate MODEL_DIR=...` | 生成样本评估 |
+| `make compare-runs` | 多次训练对比 |
+| `make train-info` | 查看硬件信息 |
 
 ---
 

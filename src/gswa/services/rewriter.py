@@ -60,6 +60,12 @@ class RewriterService:
         except Exception as e:
             logger.warning(f"Could not load similarity index: {e}")
 
+    def _is_lora_model(self, model: Optional[str]) -> bool:
+        """Check if the model name refers to a LoRA adapter."""
+        if not model:
+            return False
+        return model.startswith("gswa-") or model.startswith("lora-")
+
     async def rewrite(self, request: RewriteRequest) -> RewriteResponse:
         """Rewrite text with multiple variants.
 
@@ -85,24 +91,33 @@ class RewriterService:
             request.n_variants
         )
 
+        # Check if using a LoRA model (simplified prompts)
+        using_lora = self._is_lora_model(request.model)
+        if using_lora:
+            logger.info(f"Using LoRA model: {request.model} (simplified prompts)")
+
         variants: list[RewriteVariant] = []
 
         for i, strategy in enumerate(strategies):
             logger.info(f"Generating variant {i+1}/{len(strategies)} with strategy {strategy.value}")
 
-            # Build prompts (now includes anti-AI rules and style fingerprint)
+            # Build prompts (simplified for LoRA models)
             system_prompt = self.prompt_service.build_system_prompt(
                 section=request.section,
                 is_fallback=False,
-                include_anti_ai=True,
-                include_style=True,
+                include_anti_ai=not using_lora,  # Skip anti-AI for LoRA
+                include_style=not using_lora,     # Skip style guidance for LoRA
+                for_lora=using_lora,
             )
             user_prompt = self.prompt_service.build_user_prompt(
                 text=request.text,
                 strategy=strategy,
+                for_lora=using_lora,
+                variant_index=i,
             )
 
             # Generate initial variant
+            # For LoRA: system_prompt is empty, user_prompt has instruction+text
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -114,6 +129,7 @@ class RewriterService:
             generated_text = await self.llm_client.complete(
                 messages=messages,
                 temperature=temp,
+                model=request.model,
             )
 
             # Check similarity
@@ -132,8 +148,9 @@ class RewriterService:
                 system_prompt = self.prompt_service.build_system_prompt(
                     section=request.section,
                     is_fallback=True,
-                    include_anti_ai=True,
-                    include_style=True,
+                    include_anti_ai=not using_lora,
+                    include_style=not using_lora,
+                    for_lora=using_lora,
                 )
 
                 messages = [
@@ -144,6 +161,7 @@ class RewriterService:
                 generated_text = await self.llm_client.complete(
                     messages=messages,
                     temperature=temp + 0.1,  # Slightly higher temp for fallback
+                    model=request.model,
                 )
 
                 # Re-check similarity
@@ -182,6 +200,7 @@ class RewriterService:
             ))
 
         processing_time = int((time.time() - start_time) * 1000)
+        model_version = f"{request.model or self.settings.vllm_model_name}@v1"
 
         # Store session for feedback collection
         import uuid
@@ -191,12 +210,12 @@ class RewriterService:
             input_text=request.text,
             variants=[v.model_dump() for v in variants],
             section=request.section.value if request.section else None,
-            model_version=f"{self.settings.vllm_model_name}@v1",
+            model_version=model_version,
         )
 
         return RewriteResponse(
             variants=variants,
-            model_version=f"{self.settings.vllm_model_name}@v1",
+            model_version=model_version,
             processing_time_ms=processing_time,
         )
 
@@ -211,6 +230,9 @@ class RewriterService:
         max_tokens = self.settings.max_new_tokens
         variants: list[RewriteVariant] = []
 
+        # Check if using a LoRA model
+        using_lora = self._is_lora_model(request.model)
+
         for i, strategy in enumerate(strategies):
             yield {
                 "type": "variant_start",
@@ -222,10 +244,13 @@ class RewriterService:
             system_prompt = self.prompt_service.build_system_prompt(
                 section=request.section,
                 is_fallback=False,
+                for_lora=using_lora,
             )
             user_prompt = self.prompt_service.build_user_prompt(
                 text=request.text,
                 strategy=strategy,
+                for_lora=using_lora,
+                variant_index=i,
             )
             messages = [
                 {"role": "system", "content": system_prompt},
@@ -241,6 +266,7 @@ class RewriterService:
                 messages=messages,
                 temperature=temp,
                 max_tokens=max_tokens,
+                model=request.model,
             ):
                 parts.append(delta)
                 tokens_generated += estimate_token_count(delta)
@@ -275,6 +301,7 @@ class RewriterService:
                 system_prompt = self.prompt_service.build_system_prompt(
                     section=request.section,
                     is_fallback=True,
+                    for_lora=using_lora,
                 )
                 messages = [
                     {"role": "system", "content": system_prompt},
@@ -298,6 +325,7 @@ class RewriterService:
                     messages=messages,
                     temperature=temp + 0.1,
                     max_tokens=max_tokens,
+                    model=request.model,
                 ):
                     parts.append(delta)
                     tokens_generated += estimate_token_count(delta)
@@ -343,9 +371,10 @@ class RewriterService:
             ))
 
         processing_time = int((time.time() - start_time) * 1000)
+        model_version = f"{request.model or self.settings.vllm_model_name}@v1"
         response = RewriteResponse(
             variants=variants,
-            model_version=f"{self.settings.vllm_model_name}@v1",
+            model_version=model_version,
             processing_time_ms=processing_time,
         )
         yield {

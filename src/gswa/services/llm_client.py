@@ -26,6 +26,11 @@ class LLMClient:
     # Allowed hosts for local-only operation
     ALLOWED_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0"}
 
+    # Stop tokens for LoRA models to prevent generating training data artifacts
+    # The model tends to continue with references (". J ", ". (") after rewriting
+    LORA_STOP_TOKENS = [". J ", ". (", "\n\n", "1. ", "2. ", "[1]", "[2]"]
+    LORA_MAX_TOKENS = 512  # Limit tokens for single paragraph rewrites
+
     def __init__(self):
         """Initialize LLM client with security validation."""
         self.settings = get_settings()
@@ -82,12 +87,42 @@ class LLMClient:
                 return {"status": "error", "backend": self._backend, "error": str(e)}
         return {"status": "disconnected", "backend": self._backend}
 
+    def _is_lora_model(self, model: Optional[str]) -> bool:
+        """Check if the model name refers to a LoRA adapter."""
+        if not model:
+            return False
+        return model.startswith("gswa-") or model.startswith("lora-")
+
+    def _format_for_lora(self, messages: list[dict]) -> list[dict]:
+        """Format messages for LoRA models trained on alpaca format.
+
+        LoRA adapters were trained with format: instruction + input (no system).
+        The user message should already contain the instruction + text.
+        We just need to remove any system message.
+
+        Args:
+            messages: Original messages
+
+        Returns:
+            Messages with only user content (system removed)
+        """
+        user_content = None
+        for msg in messages:
+            if msg["role"] == "user":
+                user_content = msg["content"]
+                break
+
+        if user_content:
+            return [{"role": "user", "content": user_content}]
+        return messages
+
     async def complete(
         self,
         messages: list[dict],
         temperature: float = 0.3,
         max_tokens: int = 1024,
         stop: Optional[list[str]] = None,
+        model: Optional[str] = None,
     ) -> str:
         """Generate completion from LLM server.
 
@@ -96,6 +131,7 @@ class LLMClient:
             temperature: Sampling temperature
             max_tokens: Maximum tokens to generate
             stop: Stop sequences
+            model: Override model/adapter name (for LoRA selection)
 
         Returns:
             Generated text
@@ -103,14 +139,26 @@ class LLMClient:
         Raises:
             httpx.HTTPError: On API errors
         """
+        # For LoRA adapters, use simpler format and add stop tokens
+        effective_messages = messages
+        effective_max_tokens = max_tokens
+        effective_stop = stop
+
+        if self._is_lora_model(model):
+            effective_messages = self._format_for_lora(messages)
+            effective_max_tokens = min(max_tokens, self.LORA_MAX_TOKENS)
+            # Add LoRA stop tokens to prevent generating training artifacts
+            effective_stop = list(set((stop or []) + self.LORA_STOP_TOKENS))
+            logger.debug(f"Using LoRA format for model: {model}")
+
         payload = {
-            "model": self._model,
-            "messages": messages,
+            "model": model or self._model,
+            "messages": effective_messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_tokens": effective_max_tokens,
         }
-        if stop:
-            payload["stop"] = stop
+        if effective_stop:
+            payload["stop"] = effective_stop
 
         # Add stream: false for Ollama compatibility
         if self._backend == "ollama":
@@ -133,6 +181,7 @@ class LLMClient:
         temperature: float = 0.3,
         max_tokens: int = 1024,
         stop: Optional[list[str]] = None,
+        model: Optional[str] = None,
     ):
         """Stream completion deltas from LLM server.
 
@@ -141,19 +190,31 @@ class LLMClient:
             temperature: Sampling temperature
             max_tokens: Maximum tokens to generate
             stop: Stop sequences
+            model: Override model/adapter name (for LoRA selection)
 
         Yields:
             Delta text chunks
         """
+        # For LoRA adapters, use simpler format and add stop tokens
+        effective_messages = messages
+        effective_max_tokens = max_tokens
+        effective_stop = stop
+
+        if self._is_lora_model(model):
+            effective_messages = self._format_for_lora(messages)
+            effective_max_tokens = min(max_tokens, self.LORA_MAX_TOKENS)
+            effective_stop = list(set((stop or []) + self.LORA_STOP_TOKENS))
+            logger.debug(f"Using LoRA format for streaming model: {model}")
+
         payload = {
-            "model": self._model,
-            "messages": messages,
+            "model": model or self._model,
+            "messages": effective_messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_tokens": effective_max_tokens,
             "stream": True,
         }
-        if stop:
-            payload["stop"] = stop
+        if effective_stop:
+            payload["stop"] = effective_stop
 
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream(

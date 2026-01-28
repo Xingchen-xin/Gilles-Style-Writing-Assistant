@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     # === SECURITY (HARDCODED DEFAULTS) ===
     allow_external_api: bool = False  # MUST remain False
 
+    # === Authentication (enabled by default for security) ===
+    # Override with GSWA_AUTH_USER and GSWA_AUTH_PASS environment variables
+    auth_enabled: bool = True  # Authentication enabled by default
+    auth_user: str = "gilles"  # Default username
+    auth_pass: str = "IBLGilles2026"  # Default password
+
     # === LLM Backend ===
     # Supported: "vllm" (Linux/NVIDIA), "ollama" (Mac/Linux), "lm-studio" (Desktop)
     llm_backend: Literal["vllm", "ollama", "lm-studio"] = "vllm"
@@ -36,7 +42,7 @@ class Settings(BaseSettings):
     # - ollama: http://localhost:11434/v1
     # - lm-studio: http://localhost:1234/v1
     vllm_base_url: str = "http://localhost:8000/v1"
-    vllm_model_name: str = "mistral-7b-instruct"
+    vllm_model_name: str = "mistralai/Mistral-Nemo-Instruct-2407"  # Match start_vllm.sh default
     vllm_api_key: str = "dummy"  # Local servers don't need real keys
 
     @property
@@ -69,6 +75,7 @@ class Settings(BaseSettings):
     corpus_path: str = "./data/corpus/parsed"
     index_path: str = "./data/index"
     log_path: str = "./logs"
+    models_dir: str = "./models"
 
     # === Embedding ===
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"

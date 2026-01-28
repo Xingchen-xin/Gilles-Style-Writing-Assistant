@@ -60,7 +60,10 @@ class CUDATrainingConfig:
 
     # Hardware
     use_cpu: bool = False
-    device_map: str = "auto"
+    # Note: device_map is NOT used for training (DDP handles GPU assignment via LOCAL_RANK).
+    # This field is kept only for inference/loading compatibility.
+    # NEVER use device_map="auto" for training - it causes pipeline-parallel mode
+    # which breaks gradient synchronization. See finetune_lora.py for correct DDP usage.
 
     # Reproducibility
     seed: int = 42

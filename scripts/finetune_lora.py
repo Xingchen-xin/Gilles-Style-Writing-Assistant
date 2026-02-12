@@ -704,15 +704,24 @@ def train_with_transformers(args):
                 prefix_lengths.append(0)  # Completion format: no masking
 
         # Create labels: mask prompt prefix and padding tokens to -100
+        # IMPORTANT: When pad_token == eos_token, we must NOT mask the
+        # first EOS after the response — the model needs to learn to stop.
+        # Only mask consecutive pad/eos tokens that follow the first EOS.
         labels = []
         for idx, input_ids in enumerate(tokenized["input_ids"]):
             prefix_len = prefix_lengths[idx]
             label = []
+            found_eos_after_response = False
             for pos, token_id in enumerate(input_ids):
                 if pos < prefix_len:
                     label.append(-100)  # Mask instruction/input tokens
+                elif found_eos_after_response:
+                    label.append(-100)  # Mask all padding after first EOS
                 elif token_id == pad_token_id:
-                    label.append(-100)  # Mask padding
+                    # This is the first EOS/pad after the response — keep it
+                    # so the model learns to generate EOS to stop
+                    label.append(token_id)
+                    found_eos_after_response = True
                 elif token_id >= vocab_size:
                     label.append(-100)  # Safety: out-of-vocab
                 else:

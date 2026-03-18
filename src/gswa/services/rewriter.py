@@ -13,11 +13,11 @@ from gswa.api.schemas import (
     RewriteRequest, RewriteResponse, RewriteVariant,
     SimilarityScores
 )
-from gswa.services.llm_client import get_llm_client
+from gswa.services.generator import get_generator
 from gswa.services.similarity import SimilarityService
 from gswa.services.prompt import PromptService, get_prompt_service
 from gswa.services.feedback import get_feedback_service
-from gswa.utils.ai_detector import get_ai_detector, correct_ai_traces
+from gswa.utils.ai_detector import get_ai_detector, correct_ai_traces, calculate_burstiness
 from gswa.config import get_settings
 
 
@@ -36,7 +36,7 @@ class RewriterService:
     def __init__(self):
         """Initialize rewriter service."""
         self.settings = get_settings()
-        self.llm_client = get_llm_client()
+        self.generator = get_generator()
         self.similarity_service = SimilarityService()
         self.prompt_service = get_prompt_service()
         self.ai_detector = get_ai_detector()
@@ -66,6 +66,28 @@ class RewriterService:
             return False
         return model.startswith("gswa-") or model.startswith("lora-")
 
+    def _rank_variants(self, variants: list[RewriteVariant]) -> list[RewriteVariant]:
+        """Rank variants by composite quality score (best first).
+
+        Score = 0.5 * sentence_cv + 0.5 * (1 - ai_score)
+        Higher is better: high CV (varied sentences) + low AI score (human-like).
+        """
+        scored = []
+        for v in variants:
+            cv = calculate_burstiness(v.text)
+            ai = v.scores.ai_score if v.scores.ai_score is not None else 0.5
+            quality = 0.5 * cv + 0.5 * (1.0 - ai)
+            scored.append((quality, cv, v))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        # Log ranking for debugging
+        for rank, (quality, cv, v) in enumerate(scored):
+            ai = v.scores.ai_score if v.scores.ai_score is not None else 0.5
+            logger.info(f"  Rank {rank+1}: strategy={v.strategy.value} quality={quality:.3f} cv={cv:.3f} ai={ai:.3f}")
+
+        return [v for _, _, v in scored]
+
     async def rewrite(self, request: RewriteRequest) -> RewriteResponse:
         """Rewrite text with multiple variants.
 
@@ -91,8 +113,8 @@ class RewriterService:
             request.n_variants
         )
 
-        # Check if using a LoRA model (simplified prompts)
-        using_lora = self._is_lora_model(request.model)
+        # Check if using a LoRA model (simplified prompts) — skip for API backend
+        using_lora = not self.generator.is_api and self._is_lora_model(request.model)
         if using_lora:
             logger.info(f"Using LoRA model: {request.model} (simplified prompts)")
 
@@ -126,7 +148,7 @@ class RewriterService:
             temp = self.settings.temperature_base + (i - len(strategies) // 2) * self.settings.temperature_variance
             temp = max(0.1, min(1.0, temp))
 
-            generated_text = await self.llm_client.complete(
+            generated_text = await self.generator.complete(
                 messages=messages,
                 temperature=temp,
                 model=request.model,
@@ -158,7 +180,7 @@ class RewriterService:
                     {"role": "user", "content": user_prompt}
                 ]
 
-                generated_text = await self.llm_client.complete(
+                generated_text = await self.generator.complete(
                     messages=messages,
                     temperature=temp + 0.1,  # Slightly higher temp for fallback
                     model=request.model,
@@ -194,13 +216,18 @@ class RewriterService:
                     embed_top1=scores["embed_top1"],
                     top1_doc_id=scores.get("top1_doc_id"),
                     top1_para_id=scores.get("top1_para_id"),
+                    ai_score=ai_result.ai_score,
+                    ai_issues=len(ai_result.pattern_issues),
                 ),
                 fallback=fallback or (ai_score > self.ai_score_threshold),
                 fallback_reason=fallback_reason,
             ))
 
+        # Rank variants by composite quality (best CV + lowest AI score first)
+        variants = self._rank_variants(variants)
+
         processing_time = int((time.time() - start_time) * 1000)
-        model_version = f"{request.model or self.settings.vllm_model_name}@v1"
+        model_version = f"{request.model or self.generator.model_name}@v1"
 
         # Store session for feedback collection
         import uuid
@@ -218,6 +245,28 @@ class RewriterService:
             model_version=model_version,
             processing_time_ms=processing_time,
         )
+
+    async def _stream_or_complete(self, messages, temperature, max_tokens, model):
+        """Stream from local backend or fall back to non-streaming for API."""
+        if self.generator.is_api:
+            # API backend: non-streaming, yield result as single chunk
+            result = await self.generator.complete(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                model=model,
+            )
+            yield result
+        else:
+            # Local backend: true streaming
+            from gswa.services.llm_client import get_llm_client
+            async for delta in get_llm_client().stream_complete(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                model=model,
+            ):
+                yield delta
 
     async def rewrite_stream(self, request: RewriteRequest):
         """Rewrite text with streaming progress events."""
@@ -262,7 +311,7 @@ class RewriterService:
 
             tokens_generated = 0
             parts: list[str] = []
-            async for delta in self.llm_client.stream_complete(
+            async for delta in self._stream_or_complete(
                 messages=messages,
                 temperature=temp,
                 max_tokens=max_tokens,
@@ -321,7 +370,7 @@ class RewriterService:
                     "is_fallback": True,
                 }
 
-                async for delta in self.llm_client.stream_complete(
+                async for delta in self._stream_or_complete(
                     messages=messages,
                     temperature=temp + 0.1,
                     max_tokens=max_tokens,
@@ -371,7 +420,7 @@ class RewriterService:
             ))
 
         processing_time = int((time.time() - start_time) * 1000)
-        model_version = f"{request.model or self.settings.vllm_model_name}@v1"
+        model_version = f"{request.model or self.generator.model_name}@v1"
         response = RewriteResponse(
             variants=variants,
             model_version=model_version,

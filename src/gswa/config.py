@@ -8,6 +8,7 @@ Supports multiple LLM backends:
 - vllm: For Linux/NVIDIA GPU servers
 - ollama: For Mac (Apple Silicon) and Linux
 - lm-studio: For desktop users with LM Studio
+- anthropic: For Anthropic Claude API (requires allow_external_api=true)
 """
 from functools import lru_cache
 from typing import Literal
@@ -33,8 +34,12 @@ class Settings(BaseSettings):
     auth_pass: str = "IBLGilles2026"  # Default password
 
     # === LLM Backend ===
-    # Supported: "vllm" (Linux/NVIDIA), "ollama" (Mac/Linux), "lm-studio" (Desktop)
-    llm_backend: Literal["vllm", "ollama", "lm-studio"] = "vllm"
+    # Supported: "vllm" (Linux/NVIDIA), "ollama" (Mac/Linux), "lm-studio" (Desktop), "anthropic" (Claude API)
+    llm_backend: Literal["vllm", "ollama", "lm-studio", "anthropic", "groq", "openrouter"] = "vllm"
+
+    # === Anthropic API (only when llm_backend="anthropic") ===
+    api_key: str = ""  # Anthropic API key (sk-ant-...)
+    api_model: str = "claude-sonnet-4-20250514"  # Default Claude model
 
     # === LLM Server ===
     # Default URLs by backend:
@@ -82,11 +87,22 @@ class Settings(BaseSettings):
 
     def validate_security(self) -> None:
         """Validate security constraints at startup."""
-        if self.allow_external_api:
+        external_backends = {"anthropic", "groq", "openrouter"}
+        if self.llm_backend in external_backends:
+            # External backends require explicit opt-in
+            if not self.allow_external_api:
+                raise ValueError(
+                    f"{self.llm_backend} backend requires ALLOW_EXTERNAL_API=true. "
+                    f"Set both LLM_BACKEND={self.llm_backend} and ALLOW_EXTERNAL_API=true."
+                )
+            if not self.api_key:
+                raise ValueError(
+                    f"{self.llm_backend} backend requires API_KEY to be set in your .env file."
+                )
+        elif self.allow_external_api:
             raise ValueError(
-                "CRITICAL: ALLOW_EXTERNAL_API=true is FORBIDDEN. "
-                "This system MUST run fully offline. "
-                "Remove or set ALLOW_EXTERNAL_API=false."
+                "CRITICAL: ALLOW_EXTERNAL_API=true is only allowed with LLM_BACKEND=anthropic. "
+                "For local backends, set ALLOW_EXTERNAL_API=false."
             )
 
 

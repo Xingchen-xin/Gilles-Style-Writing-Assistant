@@ -16,7 +16,7 @@ from gswa.api.schemas import (
     StyleAnalysisRequest, StyleAnalysisResponse, StyleDimension
 )
 from gswa.services.rewriter import get_rewriter_service
-from gswa.services.llm_client import get_llm_client
+from gswa.services.generator import get_generator
 from gswa.services.similarity import get_similarity_service
 from gswa.services.feedback import get_feedback_service
 from gswa.services.model_registry import get_model_registry
@@ -33,12 +33,12 @@ async def health_check():
     Returns:
         Health status including LLM server connection and corpus info
     """
-    llm_client = get_llm_client()
+    generator = get_generator()
     similarity_service = get_similarity_service()
     registry = get_model_registry()
 
     # Check LLM server
-    llm_status = await llm_client.check_health()
+    llm_status = await generator.check_health()
 
     return HealthResponse(
         status="healthy" if llm_status["status"] == "connected" else "degraded",
@@ -58,13 +58,13 @@ async def list_models():
         List of trained LoRA adapters with metadata
     """
     registry = get_model_registry()
-    llm_client = get_llm_client()
+    generator = get_generator()
 
     models = [ModelInfo(**m.to_dict()) for m in registry.models]
     return ModelsResponse(
         models=models,
-        active_model=llm_client.model_name,
-        base_model=llm_client.model_name,
+        active_model=generator.model_name,
+        base_model=generator.model_name,
     )
 
 
@@ -136,15 +136,15 @@ async def reply(request: ReplyRequest):
         HTTPException: On processing errors
     """
     try:
-        llm_client = get_llm_client()
+        generator = get_generator()
         messages = [{"role": m.role, "content": m.content} for m in request.messages]
-        content = await llm_client.complete(
+        content = await generator.complete(
             messages=messages,
             max_tokens=request.max_tokens,
         )
         return ReplyResponse(
             content=content,
-            model=llm_client.model_name,
+            model=generator.model_name,
         )
     except Exception as e:
         logger.exception("Error in reply")
@@ -257,14 +257,14 @@ async def analyze_style(request: StyleAnalysisRequest):
         Detailed style analysis with scores and suggestions
     """
     try:
-        llm_client = get_llm_client()
+        generator = get_generator()
 
         messages = [
             {"role": "system", "content": "You are a scientific writing style analyzer. Always respond with valid JSON only, no markdown."},
             {"role": "user", "content": STYLE_ANALYSIS_PROMPT + request.text}
         ]
 
-        response_text = await llm_client.complete(
+        response_text = await generator.complete(
             messages=messages,
             max_tokens=1024,
             temperature=0.3,  # Lower temperature for more consistent analysis
@@ -292,7 +292,7 @@ async def analyze_style(request: StyleAnalysisRequest):
             summary=result.get("summary", "Analysis complete."),
             dimensions=dimensions,
             suggestions=result.get("suggestions", [])[:5],  # Limit to 5 suggestions
-            model_used=llm_client.model_name,
+            model_used=generator.model_name,
         )
 
     except json.JSONDecodeError as e:

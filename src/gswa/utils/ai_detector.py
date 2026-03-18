@@ -568,49 +568,48 @@ class TextHumanizer:
     """
 
     # Phrase replacements
+    # NOTE: Do NOT remove Gilles's preferred transitions (However, Thus,
+    # Importantly, Interestingly, Indeed) - these are part of his style.
     REPLACEMENTS = [
         # Remove filler phrases entirely
         (r'It is worth noting that\s+', ''),
         (r'It is important to note that\s+', ''),
         (r'It should be noted that\s+', ''),
-        (r'Notably,\s+', ''),
-        (r'Importantly,\s+', ''),
-        (r'Interestingly,\s+', ''),
 
-        # Replace formal transitions
+        # Replace AI-typical formal transitions (NOT Gilles's preferred ones)
         (r'\bFurthermore,\s+', 'Also, '),
         (r'\bMoreover,\s+', 'Also, '),
         (r'\bAdditionally,\s+', 'Also, '),
-        (r'\bConsequently,\s+', 'So '),
-        (r'\bNevertheless,\s+', 'Still, '),
-        (r'\bNonetheless,\s+', 'Yet '),
-        (r'\bHence,\s+', 'So '),
+        (r'\bConsequently,\s+', 'Thus, '),
+        (r'\bHence,\s+', 'Thus, '),
 
-        # Simplify vocabulary
+        # Simplify AI-typical vocabulary
         (r'\butilize\b', 'use'),
         (r'\butilized\b', 'used'),
         (r'\butilizes\b', 'uses'),
         (r'\butilizing\b', 'using'),
         (r'\bleverage\b', 'use'),
         (r'\bleveraged\b', 'used'),
-        (r'\bfacilitate\b', 'help'),
-        (r'\bfacilitated\b', 'helped'),
+        (r'\bfacilitate\b', 'allow'),
+        (r'\bfacilitated\b', 'allowed'),
+        (r'\bfacilitates\b', 'allows'),
         (r'\bcommence\b', 'start'),
         (r'\bcommenced\b', 'started'),
         (r'\bprior to\b', 'before'),
-        (r'\bsubsequently\b', 'then'),
         (r'\bin order to\b', 'to'),
-        (r'\bdemonstrate\b', 'show'),
-        (r'\bdemonstrated\b', 'showed'),
-        (r'\bdemonstrates\b', 'shows'),
+        (r'\belucidate\b', 'clarify'),
+        (r'\belucidated\b', 'clarified'),
+        (r'\bunderscore[sd]?\b', 'highlight'),
+        (r'\bunderscoring\b', 'highlighting'),
+        (r'\bunveil[sed]*\b', 'reveal'),
+        (r'\bunveiling\b', 'revealing'),
 
         # Simplify verbose phrases
         (r'\bplays a crucial role in\b', 'is key to'),
-        (r'\bplays a vital role in\b', 'is vital for'),
+        (r'\bplays a vital role in\b', 'is important for'),
         (r'\bplays a pivotal role in\b', 'is central to'),
         (r'\ba wide range of\b', 'many'),
         (r'\ba wide variety of\b', 'various'),
-        (r'\bwith respect to\b', 'for'),
         (r'\bin terms of\b', 'for'),
         (r'\bin the context of\b', 'in'),
     ]
@@ -625,8 +624,11 @@ class TextHumanizer:
         Returns:
             Humanized text
         """
+        # Step 0: Strip markdown formatting from LLM output
+        result = re.sub(r'\*\*(.+?)\*\*', r'\1', text)  # Bold
+        result = re.sub(r'\*(.+?)\*', r'\1', result)     # Italic
+
         # Step 1: Apply phrase replacements
-        result = text
         for pattern, replacement in self.REPLACEMENTS:
             result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
 
@@ -639,50 +641,299 @@ class TextHumanizer:
         if current_burstiness < target_burstiness:
             result = self._vary_sentences(result)
 
-        # Step 4: Clean up
+        # Step 4: Fix fragments AFTER vary_sentences (which may create new ones)
+        result = self._fix_fragments(result)
+
+        # Step 5: Clean up
         result = re.sub(r'\s+', ' ', result)
         result = re.sub(r'\s+([.,;:])', r'\1', result)
 
         return result.strip()
 
+    def _fix_fragments(self, text: str) -> str:
+        """Detect and merge sentence fragments back into adjacent sentences.
+
+        Fragments are incomplete sentences that lack a subject+verb. Common
+        patterns from LLMs trying to write short sentences:
+        - "Many of which remain silent." (relative clause)
+        - "Notably the bld genes." (adverb + noun)
+        - "Given the potential." (participle phrase)
+        """
+        sentences = split_sentences(text)
+        if len(sentences) < 2:
+            return text
+
+        # Pattern: sentence starts with a fragment indicator
+        fragment_starts = re.compile(
+            r'^(?:'
+            r'(?:many|some|most|all|none|each|several) of (?:which|whom|these|those)|'  # relative
+            r'(?:notably|particularly|especially|given|including) [a-z]|'  # participle/adverb
+            r'(?:such as|rather than|as well as|along with) |'  # comparative
+            r'(?:transitioning|resulting|leading|followed by) |'  # dangling participle
+            r'(?:achievable|observable|detectable) '  # adjective fragment
+            r')',
+            re.IGNORECASE
+        )
+        # Verbs that need a subject (fragments when starting a sentence)
+        subjectless_verb = re.compile(
+            r'^(?:undergo|exhibit|transition|reveal|encode|produce|suggest|indicate|demonstrate|show|require|control|remain|is|are|was|were|has|have|had)\b',
+            re.IGNORECASE
+        )
+        # Common finite verbs for detecting if a sentence has a verb
+        has_verb = re.compile(
+            r'\b(?:is|are|was|were|has|have|had|do|does|did|can|will|may|shall|could|would|might|should|'
+            r'\w+ed|'  # past tense
+            r'\w+es|'  # third person
+            r'\w+ates?|'  # -ate verbs
+            r'\w+izes?'  # -ize verbs
+            r')\b'
+        )
+
+        merged: list[str] = []
+        skip_next = False
+        for i, sent in enumerate(sentences):
+            if skip_next:
+                skip_next = False
+                continue
+
+            words = sent.split()
+            word_count = len(words)
+
+            # Check if this sentence is a fragment
+            is_fragment = False
+            # Relative clauses, dangling participles, etc.
+            if word_count <= 12 and fragment_starts.match(sent):
+                is_fragment = True
+            # Verb without subject (< 10 words)
+            elif word_count <= 10 and subjectless_verb.match(sent):
+                is_fragment = True
+            # Short sentence without any verb → likely a fragment
+            # e.g. "Streptomyces, renowned for their production."
+            elif word_count <= 8 and not has_verb.search(sent):
+                is_fragment = True
+            # Very short noun phrase with appositive: "Noun, appositive."
+            elif word_count <= 4 and ',' in sent:
+                is_fragment = True
+
+            if is_fragment and merged:
+                # Merge with previous sentence (restore as relative clause)
+                prev = merged[-1].rstrip('.')
+                merged[-1] = f"{prev}, {sent[0].lower()}{sent[1:]}."
+            elif is_fragment and i + 1 < len(sentences):
+                # Merge with next sentence
+                next_sent = sentences[i + 1]
+                merged.append(f"{sent}, {next_sent[0].lower()}{next_sent[1:]}.")
+                skip_next = True
+            else:
+                # Ensure sentence ends with period
+                sent_clean = sent.rstrip('.')
+                merged.append(f"{sent_clean}.")
+
+        return ' '.join(merged)
+
     def _vary_sentences(self, text: str) -> str:
-        """Add variation to sentence lengths."""
+        """Add variation to sentence lengths to increase CV.
+
+        Strategy (split-only, never combine):
+        1. Split sentences >25 words at natural break points
+        2. For runs of 3+ similar-length sentences, split the longest one
+        3. Never combine sentences — that creates longer uniform ones
+        Goal: CV > 0.4.
+        """
         sentences = split_sentences(text)
 
         if len(sentences) < 3:
             return text
 
-        # Find sentences that could be split or combined
-        modified = []
-        i = 0
+        # Phase 1: Split long sentences at natural break points
+        split_result = []
+        for sent in sentences:
+            parts = self._try_split_sentence(sent)
+            split_result.extend(parts)
 
-        while i < len(sentences):
-            sent = sentences[i]
-            words = tokenize(sent)
-            word_count = len(words)
-
-            # Very long sentence: try to split
-            if word_count > 35 and '; ' in sent:
-                parts = sent.split('; ')
-                modified.extend(parts)
+        # Phase 2: Break up runs of similar-length sentences
+        # If 3+ consecutive sentences have similar word counts (within ±5),
+        # try to split the longest one in the run
+        modified = list(split_result)
+        changed = True
+        max_passes = 3
+        while changed and max_passes > 0:
+            changed = False
+            max_passes -= 1
+            lengths = [len(s.split()) for s in modified]
+            i = 0
+            new_modified = []
+            while i < len(modified):
+                # Check for a run of 3+ similar-length sentences
+                run_end = i + 1
+                while run_end < len(modified):
+                    if abs(lengths[run_end] - lengths[i]) <= 5:
+                        run_end += 1
+                    else:
+                        break
+                run_len = run_end - i
+                if run_len >= 3:
+                    # Try to split ANY sentence in the run (longest first)
+                    run_sents = modified[i:run_end]
+                    # Sort indices by sentence length (longest first)
+                    sorted_indices = sorted(
+                        range(len(run_sents)),
+                        key=lambda j: len(run_sents[j].split()),
+                        reverse=True
+                    )
+                    split_done = False
+                    for try_idx in sorted_indices:
+                        sent = run_sents[try_idx]
+                        if len(sent.split()) < 8:
+                            continue
+                        # Try normal split first, then comma split
+                        parts = self._try_split_sentence(sent, threshold=12)
+                        if len(parts) == 1:
+                            parts = self._split_at_comma(sent)
+                        if len(parts) > 1:
+                            for j, s in enumerate(run_sents):
+                                if j == try_idx:
+                                    new_modified.extend(parts)
+                                else:
+                                    new_modified.append(s)
+                            i = run_end
+                            changed = True
+                            split_done = True
+                            break
+                    if split_done:
+                        continue
+                # No run or couldn't split — pass through
+                new_modified.append(modified[i])
                 i += 1
-                continue
+            modified = new_modified
 
-            # Medium sentence followed by short: might combine
-            if (i + 1 < len(sentences) and
-                15 < word_count < 25 and
-                len(tokenize(sentences[i + 1])) < 12):
-                # Sometimes combine with "and" or "—"
-                if len(modified) % 3 == 0:  # Every third opportunity
-                    combined = f"{sent.rstrip('.')} — {sentences[i + 1].lower()}"
-                    modified.append(combined)
-                    i += 2
-                    continue
+        # Ensure proper sentence endings
+        result = []
+        for s in modified:
+            s = s.strip()
+            if s and not s.endswith(('.', '!', '?')):
+                s += '.'
+            result.append(s)
 
-            modified.append(sent)
-            i += 1
+        return ' '.join(result)
 
-        return ' '.join(modified)
+    def _try_split_sentence(self, sent: str, threshold: int = 25) -> list[str]:
+        """Try to split a sentence at a natural break point.
+
+        Args:
+            sent: The sentence to split
+            threshold: Word count above which to attempt splitting
+
+        Returns:
+            List of 1 or more sentence fragments
+        """
+        words = sent.split()
+        if len(words) <= threshold:
+            return [sent]
+
+        # Try semicolon first (cleanest split)
+        if '; ' in sent:
+            parts = sent.split('; ', 1)
+            first = parts[0].rstrip('.') + '.'
+            second = parts[1].strip()
+            if second and second[0].islower():
+                second = second[0].upper() + second[1:]
+            return [first, second]
+
+        # Try clause-level splitters
+        splitters = [
+            (', which ', 'This '),
+            (', whereas ', 'In contrast, '),
+            (', while ', 'Meanwhile, '),
+            (', and this ', 'This '),
+            (', suggesting ', 'This suggests '),
+            (', indicating ', 'This indicates '),
+            (', resulting in ', 'This resulted in '),
+        ]
+        for marker, replacement in splitters:
+            if marker in sent:
+                idx = sent.index(marker)
+                # Only split if both halves are substantial (>5 words each)
+                first_words = len(sent[:idx].split())
+                rest_text = sent[idx + len(marker):]
+                rest_words = len(rest_text.split())
+                if first_words >= 5 and rest_words >= 4:
+                    first_part = sent[:idx] + '.'
+                    rest = replacement + rest_text
+                    if rest and rest[0].islower():
+                        rest = rest[0].upper() + rest[1:]
+                    return [first_part, rest]
+
+        # Try splitting at ", and " for longer sentences
+        if len(words) > 20 and ', and ' in sent:
+            idx = sent.index(', and ')
+            first_words = len(sent[:idx].split())
+            rest_text = sent[idx + 6:]  # skip ', and '
+            rest_words = len(rest_text.split())
+            if first_words >= 6 and rest_words >= 6:
+                first_part = sent[:idx] + '.'
+                rest = rest_text.strip()
+                if rest and rest[0].islower():
+                    rest = rest[0].upper() + rest[1:]
+                return [first_part, rest]
+
+        return [sent]
+
+    def _split_at_comma(self, sent: str) -> list[str]:
+        """Last-resort split at comma for uniform-run breaking.
+
+        Looks for introductory phrases (3-7 words before comma) where the
+        rest forms a complete clause. Restructures into two sentences.
+
+        Returns [sent] unchanged if no good split found.
+        """
+        # Find commas
+        comma_positions = [m.start() for m in re.finditer(r',\s', sent)]
+        if not comma_positions:
+            return [sent]
+
+        for pos in comma_positions:
+            before = sent[:pos].strip()
+            after = sent[pos + 2:].strip()  # skip ", "
+            before_words = len(before.split())
+            after_words = len(after.split())
+
+            # Good split: short intro (3-7 words) + substantial rest (6+ words)
+            # Rest must NOT start with a dependent-clause word or preposition
+            dependent_starts = r'^(?:which|that|because|although|though|unless|if|when|where|while|as|since|after|before|during|through|via|by|with|without|despite|for|from|into|onto|upon|including|according|between|among|having|being)\b'
+            # Before must NOT start with a preposition (would create a fragment)
+            prep_starts = r'^(?:in|on|at|under|during|after|before|with|by|for|from|through|between|among|upon|over|into|across|along|around|behind|below|beneath|beside|beyond|near|toward|against|within|without|despite|via)\b'
+            if (3 <= before_words <= 7 and after_words >= 6 and
+                    not re.match(dependent_starts, after, re.IGNORECASE) and
+                    not re.match(prep_starts, before, re.IGNORECASE)):
+                # Keep intro as short sentence + main clause as longer sentence
+                intro_sent = before.rstrip('.') + '.'
+                main_clause = after
+                if main_clause[0].islower():
+                    main_clause = main_clause[0].upper() + main_clause[1:]
+                main_sent = main_clause.rstrip('.') + '.'
+                return [intro_sent, main_sent]
+
+        # Alternative: split at comma between two balanced halves
+        for pos in comma_positions:
+            before = sent[:pos].strip()
+            after = sent[pos + 2:].strip()
+            before_words = len(before.split())
+            after_words = len(after.split())
+
+            # Balanced split where after starts with a conjunction or clause
+            if (before_words >= 5 and after_words >= 5 and
+                    re.match(r'(?:and |but |or |yet |so |which |where |when )', after)):
+                first_part = before + '.'
+                rest = after
+                # Strip leading conjunction for independent sentence
+                rest = re.sub(r'^(?:and |but |or |yet |so )', '', rest)
+                if rest and rest[0].islower():
+                    rest = rest[0].upper() + rest[1:]
+                rest = rest.rstrip('.') + '.'
+                return [first_part, rest]
+
+        return [sent]
 
 
 # ==============================================================================
